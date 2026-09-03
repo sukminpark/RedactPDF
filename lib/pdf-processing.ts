@@ -228,7 +228,9 @@ export function startPdfAnalysis(
     pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
     const sourceBytes = await file.arrayBuffer();
     mupdfClient = new MuPdfWorkerClient();
-    const nativePages = await mupdfClient.extract(sourceBytes);
+    const nativePages = await mupdfClient.extract(sourceBytes, (progress, pageIndex, message) => {
+      onProgress({ stage: 'loading', progress, pageIndex, message: message ?? 'PDF 구조를 확인하고 있어요.' });
+    });
     const bytes = new Uint8Array(sourceBytes.slice(0));
     ensureActive();
 

@@ -10,6 +10,8 @@ interface PendingRequest<T> {
   onProgress?: (progress: number, pageIndex?: number, message?: string) => void;
 }
 
+const WORKER_INACTIVITY_TIMEOUT_MS = 45_000;
+
 export class MuPdfWorkerClient {
   // Vinext resolves import.meta.url as a file URL at build time. Let Vite provide
   // the emitted deployment-root Worker URL instead.
@@ -41,14 +43,34 @@ export class MuPdfWorkerClient {
 
   private request<T>(request: MuPdfRequest, transfer: Transferable[], onProgress?: PendingRequest<T>['onProgress']): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(request.id, { resolve: resolve as (value: unknown) => void, reject, onProgress });
+      let timeout: ReturnType<typeof setTimeout>;
+      const settle = <Value>(callback: (value: Value) => void, value: Value) => {
+        clearTimeout(timeout);
+        callback(value);
+      };
+      const resetTimeout = () => {
+        clearTimeout(timeout);
+        timeout = setTimeout(() => {
+          if (!this.pending.delete(request.id)) return;
+          reject(new Error('PDF 분석 엔진이 45초 동안 응답하지 않았습니다. 잠시 후 다시 시도하거나 다른 PDF를 사용해 주세요.'));
+        }, WORKER_INACTIVITY_TIMEOUT_MS);
+      };
+      resetTimeout();
+      this.pending.set(request.id, {
+        resolve: (value) => settle(resolve as (result: unknown) => void, value),
+        reject: (reason) => settle(reject, reason),
+        onProgress: (progress, pageIndex, message) => {
+          resetTimeout();
+          onProgress?.(progress, pageIndex, message);
+        },
+      });
       this.worker.postMessage(request, transfer);
     });
   }
 
-  extract(bytes: ArrayBuffer): Promise<NativePageText[]> {
+  extract(bytes: ArrayBuffer, onProgress?: PendingRequest<NativePageText[]>['onProgress']): Promise<NativePageText[]> {
     const copy = bytes.slice(0);
-    return this.request({ id: crypto.randomUUID(), type: 'extract', bytes: copy }, [copy]);
+    return this.request({ id: crypto.randomUUID(), type: 'extract', bytes: copy }, [copy], onProgress);
   }
 
   redact(bytes: ArrayBuffer, pages: WorkerReviewPage[], onProgress?: PendingRequest<unknown>['onProgress']): Promise<{ bytes: ArrayBuffer; validation: ValidationResult }> {

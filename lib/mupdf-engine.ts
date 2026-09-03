@@ -42,11 +42,17 @@ function closeWord(
   });
 }
 
-export function extractNativePages(source: ArrayBuffer | Uint8Array): NativePageText[] {
+export function extractNativePages(
+  source: ArrayBuffer | Uint8Array,
+  onPageStart?: (pageIndex: number, totalPages: number) => void,
+): NativePageText[] {
   const document = mupdf.Document.openDocument(source, 'application/pdf');
   try {
     if (document.needsPassword()) throw new Error('암호로 보호된 PDF는 처리할 수 없습니다. 암호를 해제한 사본을 사용해 주세요.');
-    return Array.from({ length: document.countPages() }, (_, pageIndex) => {
+    const totalPages = document.countPages();
+    const pages: NativePageText[] = [];
+    for (let pageIndex = 0; pageIndex < totalPages; pageIndex += 1) {
+      onPageStart?.(pageIndex, totalPages);
       const page = document.loadPage(pageIndex) as mupdf.PDFPage;
       const structured = page.toStructuredText(TEXT_OPTIONS);
       try {
@@ -84,7 +90,7 @@ export function extractNativePages(source: ArrayBuffer | Uint8Array): NativePage
           endLine: flush,
         });
         flush();
-        return {
+        pages.push({
           pageIndex,
           width: bounds[2] - bounds[0],
           height: bounds[3] - bounds[1],
@@ -93,12 +99,13 @@ export function extractNativePages(source: ArrayBuffer | Uint8Array): NativePage
           })(),
           words,
           text: structured.asText(),
-        };
+        });
       } finally {
         structured.destroy();
         page.destroy();
       }
-    });
+    }
+    return pages;
   } finally {
     document.destroy();
   }
