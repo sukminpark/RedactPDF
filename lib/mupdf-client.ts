@@ -1,5 +1,7 @@
 'use client';
 
+// oxlint-disable-next-line import/default -- Vite turns this query import into a Worker constructor.
+import MuPdfWorker from './mupdf.worker.ts?worker';
 import type { NativePageText, MuPdfRequest, MuPdfResponse, ValidationResult, WorkerReviewPage } from './mupdf-types';
 
 interface PendingRequest<T> {
@@ -9,7 +11,9 @@ interface PendingRequest<T> {
 }
 
 export class MuPdfWorkerClient {
-  private readonly worker = new Worker(new URL('./mupdf.worker.ts', import.meta.url), { type: 'module' });
+  // Vinext resolves import.meta.url as a file URL at build time. Let Vite provide
+  // the emitted deployment-root Worker URL instead.
+  private readonly worker = new MuPdfWorker();
   private readonly pending = new Map<string, PendingRequest<unknown>>();
 
   constructor() {

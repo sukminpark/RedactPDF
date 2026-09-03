@@ -16,3 +16,8 @@ interface Document {
   };
 }
 declare const __SOURCE_COMMIT__: string;
+
+declare module '*?worker' {
+  const WorkerFactory: new (options?: WorkerOptions) => Worker;
+  export default WorkerFactory;
+}
