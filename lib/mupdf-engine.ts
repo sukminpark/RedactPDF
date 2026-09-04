@@ -160,6 +160,10 @@ function selectedTargets(page: WorkerReviewPage): { textQuads: PdfQuad[]; imageQ
 function addRedactionQuads(page: mupdf.PDFPage, quads: PdfQuad[]): void {
   for (const quad of quads) {
     const annotation = page.createAnnotation('Redact');
+    // A Quad identifies the exact glyph, while Rect is the redaction area MuPDF
+    // applies to page content. Supplying both is required by some Office-exported
+    // PDFs, which otherwise preserve their text despite retaining the Quad data.
+    annotation.setRect(quadRect(quad));
     annotation.setQuadPoints([quad as Quad]);
     annotation.update();
   }
@@ -236,6 +240,7 @@ export function validateRedactedPdf(
       errors.push(`${index + 1}쪽의 페이지 크기가 달라졌습니다.`);
     }
   });
+  const pagesWithRemainingText = new Set<number>();
   for (const item of forbidden) {
     const page = pages[item.pageIndex];
     const remainingAtTarget = item.quads?.some((target) => {
@@ -248,8 +253,9 @@ export function validateRedactedPdf(
     });
     const globalFallback = !item.quads?.length && item.text.trim() && page?.text.normalize('NFKC').includes(item.text.normalize('NFKC'));
     if (remainingAtTarget || globalFallback) {
-      errors.push(`${item.pageIndex + 1}쪽에서 삭제 대상 텍스트가 다시 추출됩니다.`);
+      pagesWithRemainingText.add(item.pageIndex);
     }
   }
+  for (const pageIndex of pagesWithRemainingText) errors.push(`${pageIndex + 1}쪽에서 삭제 대상 텍스트가 다시 추출됩니다.`);
   return { valid: errors.length === 0, pages: pages.map(({ pageIndex, width, height, text }) => ({ pageIndex, width, height, text })), errors };
 }
