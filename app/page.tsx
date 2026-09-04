@@ -523,9 +523,10 @@ export default function Home() {
           <div className="flex min-h-[610px] flex-col rounded-[28px] border border-border bg-card p-6 shadow-[0_22px_70px_rgba(28,34,31,0.08)] sm:p-9">
             <div className="mb-7 flex items-start justify-between gap-4">
               <div>
+                <p className="mb-2 text-sm font-medium text-muted-foreground sm:text-base">학교생활기록부, 대입전형자료</p>
                 <h1 className="max-w-xl text-3xl font-bold tracking-[-0.045em] sm:text-4xl">
-                  학교생활기록부와 대입전형자료
-                  <br />개인정보를 지우고, 안전한 파일로 다시 만드세요.
+                  개인정보를 지우고,
+                  <br />안전한 파일로 다시 만드세요.
                 </h1>
               </div>
               <span className="hidden size-12 place-items-center rounded-2xl bg-secondary text-primary sm:grid">
