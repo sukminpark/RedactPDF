@@ -142,6 +142,21 @@ describe('MuPDF structure-preserving redaction', () => {
     expect(validateRedactedPdf(output, [{ width: original[0].width, height: original[0].height }], [{ pageIndex: 0, text: 'SECRET', quads: candidate.targetQuads.map((item) => item.quad) }]).valid).toBe(true);
   });
 
+  it('retries the reviewed region when an Office-style glyph link cannot be applied', async () => {
+    const source = await makeDigitalFixture([{ text: 'LEFTSECRETRIGHT', y: 170 }]);
+    const original = extractNativePages(source);
+    const word = original[0].words.find((item) => item.text.includes('LEFTSECRETRIGHT'))!;
+    const candidate = exactCandidate(0, word.glyphs.slice(4, 10));
+    candidate.targetGlyphIds = ['unavailable-office-glyph'];
+
+    const output = redactPdf(source, [reviewFor(source, candidate)]);
+    const text = extractNativePages(output)[0].text;
+
+    expect(text).toContain('LEFT');
+    expect(text).toContain('RIGHT');
+    expect(text).not.toContain('SECRET');
+  });
+
   it('preserves rotation and CropBox during a full rewrite', async () => {
     const sourceDocument = await PDFDocument.create();
     const page = sourceDocument.addPage([500, 300]);

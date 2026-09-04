@@ -130,12 +130,21 @@ function sanitizeDocument(document: mupdf.PDFDocument): void {
   try { document.getTrailer().delete('Info'); } catch { /* absent info dictionary */ }
 }
 
-function selectedTargets(page: WorkerReviewPage): { textQuads: PdfQuad[]; imageQuads: PdfQuad[] } {
+type RedactionTargetMode = 'exact-glyphs' | 'regions';
+
+function rectQuad([x0, y0, x1, y1]: [number, number, number, number]): PdfQuad {
+  return [x0, y0, x1, y0, x0, y1, x1, y1];
+}
+
+function selectedTargets(
+  page: WorkerReviewPage,
+  targetMode: RedactionTargetMode,
+): { textQuads: PdfQuad[]; imageQuads: PdfQuad[] } {
   const glyphById = new Map(page.words.flatMap((word) => word.glyphs).map((glyph) => [glyph.id, glyph]));
   const textQuads: PdfQuad[] = [];
   const imageQuads: PdfQuad[] = [];
   for (const candidate of page.redactions.filter((item) => item.selected)) {
-    if (candidate.selectionMode === 'exact-glyphs' && candidate.targetGlyphIds.length > 0) {
+    if (targetMode === 'exact-glyphs' && candidate.selectionMode === 'exact-glyphs' && candidate.targetGlyphIds.length > 0) {
       for (const id of candidate.targetGlyphIds) {
         const glyph = glyphById.get(id);
         if (glyph?.source === 'native') textQuads.push(glyph.quad);
@@ -150,8 +159,20 @@ function selectedTargets(page: WorkerReviewPage): { textQuads: PdfQuad[]; imageQ
       if (glyph.source === 'native') textQuads.push(glyph.quad);
     }
     const rect = canvasRectToPdfRect(candidate, page);
+    // Office-exported PDFs can expose glyph Quads that are too narrow for the
+    // redaction operator. Only after the exact-glyph pass fails, retry against
+    // the same reviewed on-screen region (the box includes just its small UI
+    // padding), still without rasterising the page.
+    const matchingNativeGlyphs = matchingGlyphs.filter((glyph) => glyph.source === 'native');
+    if (targetMode === 'regions' && matchingNativeGlyphs.length > 0) {
+      // Do not use the visible candidate's padding here. Rebuild the fallback
+      // rectangle from the glyphs selected inside it, so adjacent characters
+      // remain outside the destructive fallback area.
+      const nativeBounds = unionRects(matchingNativeGlyphs.map((glyph) => glyph.bbox));
+      textQuads.push(rectQuad(canvasRectToPdfRect(nativeBounds, page)));
+    }
     if (candidate.kind === 'manual' || candidate.kind === 'photo' || matchingGlyphs.some((glyph) => glyph.source === 'ocr')) {
-      imageQuads.push([rect[0], rect[1], rect[2], rect[1], rect[0], rect[3], rect[2], rect[3]]);
+      imageQuads.push(rectQuad(rect));
     }
   }
   return { textQuads, imageQuads };
@@ -169,10 +190,13 @@ function addRedactionQuads(page: mupdf.PDFPage, quads: PdfQuad[]): void {
   }
 }
 
-export function redactPdf(
+function redactPdfPass(
   source: ArrayBuffer | Uint8Array,
   reviewPages: WorkerReviewPage[],
+  targetMode: RedactionTargetMode,
   onProgress?: (pageIndex: number, progress: number) => void,
+  progressStart = 0,
+  progressEnd = 90,
 ): Uint8Array {
   const opened = mupdf.Document.openDocument(source, 'application/pdf');
   const document = opened.asPDF();
@@ -184,7 +208,8 @@ export function redactPdf(
     if (document.needsPassword()) throw new Error('암호로 보호된 PDF는 저장할 수 없습니다.');
     sanitizeDocument(document);
     for (let pageIndex = 0; pageIndex < document.countPages(); pageIndex += 1) {
-      onProgress?.(pageIndex, Math.round((pageIndex / Math.max(1, document.countPages())) * 90));
+      const progress = progressStart + Math.round((pageIndex / Math.max(1, document.countPages())) * (progressEnd - progressStart));
+      onProgress?.(pageIndex, progress);
       const page = document.loadPage(pageIndex) as mupdf.PDFPage;
       try {
         for (const annotation of page.getAnnotations()) page.deleteAnnotation(annotation);
@@ -192,7 +217,7 @@ export function redactPdf(
         try { page.getObject().delete('AA'); } catch { /* absent page actions */ }
         const review = reviewPages.find((candidate) => candidate.pageIndex === pageIndex);
         if (!review) continue;
-        const targets = selectedTargets(review);
+        const targets = selectedTargets(review, targetMode);
         addRedactionQuads(page, targets.textQuads);
         if (targets.textQuads.length > 0) {
           page.applyRedactions(
@@ -224,6 +249,37 @@ export function redactPdf(
   } finally {
     document.destroy();
   }
+}
+
+function validationInputs(reviewPages: WorkerReviewPage[]) {
+  return {
+    expectedPages: reviewPages.map((page) => ({ width: page.pdfWidth, height: page.pdfHeight })),
+    forbidden: reviewPages.flatMap((page) =>
+      page.redactions
+        .filter((item) => item.selected && item.selectionMode === 'exact-glyphs')
+        .map((item) => ({
+          pageIndex: page.pageIndex,
+          text: item.sourceText,
+          quads: item.targetQuads.map((target) => target.quad),
+        })),
+    ),
+  };
+}
+
+export function redactPdf(
+  source: ArrayBuffer | Uint8Array,
+  reviewPages: WorkerReviewPage[],
+  onProgress?: (pageIndex: number, progress: number) => void,
+): Uint8Array {
+  const inputs = validationInputs(reviewPages);
+  const exactOutput = redactPdfPass(source, reviewPages, 'exact-glyphs', onProgress, 0, 85);
+  if (validateRedactedPdf(exactOutput, inputs.expectedPages, inputs.forbidden).valid) return exactOutput;
+
+  onProgress?.(0, 87);
+  const regionOutput = redactPdfPass(source, reviewPages, 'regions', onProgress, 87, 98);
+  const fallbackValidation = validateRedactedPdf(regionOutput, inputs.expectedPages, inputs.forbidden);
+  if (!fallbackValidation.valid) throw new Error(fallbackValidation.errors.join(' '));
+  return regionOutput;
 }
 
 export function validateRedactedPdf(
