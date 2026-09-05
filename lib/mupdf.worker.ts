@@ -50,7 +50,7 @@ self.onmessage = async (event: MessageEvent<MuPdfRequest>) => {
     const validation = validateRedactedPdf(
       bytes,
       request.pages.map((page) => ({ width: page.pdfWidth, height: page.pdfHeight })),
-      request.pages.flatMap((page) => page.redactions.filter((item) => item.selected && item.selectionMode === 'exact-glyphs').map((item) => ({ pageIndex: page.pageIndex, text: item.sourceText, quads: item.targetQuads.map((target) => target.quad) }))),
+      request.pages.flatMap((page) => page.redactions.filter((item) => item.selected && item.selectionMode === 'exact-glyphs').map((item) => ({ pageIndex: page.pageIndex, text: item.sourceText, quads: item.targetQuads }))),
     );
     if (!validation.valid) throw new Error(validation.errors.join(' '));
     const output = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;

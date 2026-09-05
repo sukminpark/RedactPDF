@@ -2,9 +2,9 @@ import * as mupdf from 'mupdf';
 import type { Quad, Rect } from 'mupdf';
 
 import { canvasRectToPdfRect, type NativePageText, type ValidationResult, type WorkerReviewPage } from './mupdf-types';
-import { regionTargetsGlyph, unionRects, type OcrWord, type PdfQuad, type TextGlyph } from './redaction';
+import { regionTargetsGlyph, unionRects, type CanvasRect, type OcrWord, type PdfQuad, type TextGlyph } from './redaction';
 
-const TEXT_OPTIONS = 'preserve-whitespace,accurate-bboxes,accurate-side-bearings';
+const TEXT_OPTIONS = 'preserve-whitespace,accurate-bboxes,accurate-side-bearings,preserve-images';
 const METADATA_KEYS = [
   mupdf.Document.META_INFO_AUTHOR,
   mupdf.Document.META_INFO_TITLE,
@@ -58,6 +58,7 @@ export function extractNativePages(
       try {
         const bounds = page.getBounds();
         const words: OcrWord[] = [];
+        const imageBounds: CanvasRect[] = [];
         let lineIndex = -1;
         let wordIndex = 0;
         let glyphs: TextGlyph[] = [];
@@ -87,6 +88,14 @@ export function extractNativePages(
               bbox: { x: rect[0], y: rect[1], width: Math.max(0.01, rect[2] - rect[0]), height: Math.max(0.01, rect[3] - rect[1]) },
             });
           },
+          onImageBlock(bbox) {
+            imageBounds.push({
+              x: bbox[0],
+              y: bbox[1],
+              width: Math.max(0.01, bbox[2] - bbox[0]),
+              height: Math.max(0.01, bbox[3] - bbox[1]),
+            });
+          },
           endLine: flush,
         });
         flush();
@@ -97,6 +106,7 @@ export function extractNativePages(
           rotation: (() => {
             try { return page.getObject().getInheritable('Rotate').asNumber(); } catch { return 0; }
           })(),
+          imageBounds,
           words,
           text: structured.asText(),
         });
@@ -136,6 +146,25 @@ function rectQuad([x0, y0, x1, y1]: [number, number, number, number]): PdfQuad {
   return [x0, y0, x1, y0, x0, y1, x1, y1];
 }
 
+function exactGlyphQuad(glyph: TextGlyph, candidate: WorkerReviewPage['redactions'][number], page: WorkerReviewPage): PdfQuad {
+  const renderScaleY = page.renderHeight / Math.max(1, page.pdfHeight);
+  // Some NICE exports expose a valid horizontal Quad but a nearly zero-height
+  // vertical Quad. Keep the glyph's exact horizontal span, then derive only
+  // the missing vertical extent from the reviewed on-screen candidate.
+  if (glyph.bbox.height >= renderScaleY * 2) return glyph.quad;
+  const height = Math.min(candidate.height, Math.max(glyph.bbox.height, renderScaleY * 10));
+  const centerY = Math.min(
+    candidate.y + candidate.height - height / 2,
+    Math.max(candidate.y + height / 2, glyph.bbox.y + glyph.bbox.height / 2),
+  );
+  return rectQuad(canvasRectToPdfRect({
+    x: glyph.bbox.x,
+    y: centerY - height / 2,
+    width: glyph.bbox.width,
+    height,
+  }, page));
+}
+
 function selectedTargets(
   page: WorkerReviewPage,
   targetMode: RedactionTargetMode,
@@ -147,7 +176,7 @@ function selectedTargets(
     if (targetMode === 'exact-glyphs' && candidate.selectionMode === 'exact-glyphs' && candidate.targetGlyphIds.length > 0) {
       for (const id of candidate.targetGlyphIds) {
         const glyph = glyphById.get(id);
-        if (glyph?.source === 'native') textQuads.push(glyph.quad);
+        if (glyph?.source === 'native') textQuads.push(exactGlyphQuad(glyph, candidate, page));
         if (glyph?.source === 'ocr') imageQuads.push(glyph.quad);
       }
       continue;
@@ -260,7 +289,7 @@ function validationInputs(reviewPages: WorkerReviewPage[]) {
         .map((item) => ({
           pageIndex: page.pageIndex,
           text: item.sourceText,
-          quads: item.targetQuads.map((target) => target.quad),
+          quads: item.targetQuads,
         })),
     ),
   };
@@ -272,7 +301,7 @@ export function redactPdf(
   onProgress?: (pageIndex: number, progress: number) => void,
 ): Uint8Array {
   const inputs = validationInputs(reviewPages);
-  const exactOutput = redactPdfPass(source, reviewPages, 'exact-glyphs', onProgress, 0, 85);
+  const exactOutput = redactPdfPass(source, reviewPages, 'exact-glyphs', onProgress, 3, 85);
   if (validateRedactedPdf(exactOutput, inputs.expectedPages, inputs.forbidden).valid) return exactOutput;
 
   onProgress?.(0, 87);
@@ -285,7 +314,7 @@ export function redactPdf(
 export function validateRedactedPdf(
   bytes: ArrayBuffer | Uint8Array,
   expectedPages: Array<{ width: number; height: number }>,
-  forbidden: Array<{ pageIndex: number; text: string; quads?: PdfQuad[] }>,
+  forbidden: Array<{ pageIndex: number; text: string; quads?: Array<{ quad: PdfQuad; text?: string }> }>,
 ): ValidationResult {
   const pages = extractNativePages(bytes);
   const errors: string[] = [];
@@ -300,8 +329,13 @@ export function validateRedactedPdf(
   for (const item of forbidden) {
     const page = pages[item.pageIndex];
     const remainingAtTarget = item.quads?.some((target) => {
-      const targetRect = quadRect(target);
+      const targetRect = quadRect(target.quad);
+      const targetText = target.text?.normalize('NFKC');
       return page?.words.some((word) => word.glyphs.some((glyph) => {
+        // Some office PDFs use broad or overlapping glyph quads. A nearby
+        // character in that geometry is not evidence that the selected
+        // character survived the redaction.
+        if (targetText && glyph.text.normalize('NFKC') !== targetText) return false;
         const centerX = glyph.bbox.x + glyph.bbox.width / 2;
         const centerY = glyph.bbox.y + glyph.bbox.height / 2;
         return centerX >= targetRect[0] && centerX <= targetRect[2] && centerY >= targetRect[1] && centerY <= targetRect[3];

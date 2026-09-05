@@ -480,6 +480,9 @@ export default function Home() {
       setIsSummaryOpen(false);
     }
     setError(null);
+    setStage('exporting');
+    setProgress(0);
+    setProgressMessage('개인정보 삭제 엔진을 준비하고 있어요.');
     try {
       const bytes = await exportRedactedPdf(
         await file.arrayBuffer(),

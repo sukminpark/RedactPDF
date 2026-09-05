@@ -61,7 +61,7 @@ export interface RedactionCandidate extends CanvasRect {
   selected: boolean;
   reason: string;
   targetGlyphIds: string[];
-  targetQuads: Array<{ source: GlyphSource; quad: PdfQuad }>;
+  targetQuads: Array<{ source: GlyphSource; quad: PdfQuad; text?: string }>;
   selectionMode: 'exact-glyphs' | 'region';
 }
 
@@ -83,6 +83,7 @@ const LABELS = ['성명', '이름', '신청인', '신청자', '민원인', '대�
 export interface DetectionContext {
   pageWidth?: number;
   pageHeight?: number;
+  imageBounds?: CanvasRect[];
 }
 
 export function unionRects(rects: CanvasRect[], padding = 0): CanvasRect {
@@ -181,7 +182,7 @@ function pushCandidate(
     selected: true,
     reason,
     targetGlyphIds: glyphs.map((glyph) => glyph.id),
-    targetQuads: glyphs.map((glyph) => ({ source: glyph.source, quad: glyph.quad })),
+    targetQuads: glyphs.map((glyph) => ({ source: glyph.source, quad: glyph.quad, text: glyph.text })),
     selectionMode: glyphs.length > 0 ? 'exact-glyphs' : 'region',
     ...rect,
   });
@@ -243,7 +244,7 @@ function pushWordSliceCandidate(
   const candidate = candidates.length > before ? candidates.at(-1) : undefined;
   if (candidate && selectedGlyphs.length === slice.length) {
     candidate.targetGlyphIds = selectedGlyphs.map((glyph) => glyph.id);
-    candidate.targetQuads = selectedGlyphs.map((glyph) => ({ source: glyph.source, quad: glyph.quad }));
+    candidate.targetQuads = selectedGlyphs.map((glyph) => ({ source: glyph.source, quad: glyph.quad, text: glyph.text }));
     candidate.selectionMode = 'exact-glyphs';
   }
 }
@@ -609,13 +610,30 @@ function findSchoolRecordFields(
   }
 
   if (isSchoolRecord && pageIndex === 0 && pageWidth > 0 && pageHeight > 0) {
+    // Prefer the actual image bounds embedded in the PDF. A percentage-based
+    // guess is not reliable across student-record export programs and can
+    // whiten the area above a portrait instead of the portrait itself.
+    const photoImage = (context.imageBounds ?? [])
+      .filter((image) => {
+        const aspectRatio = image.height / Math.max(1, image.width);
+        return (
+          image.x >= pageWidth * 0.62 &&
+          image.y >= pageHeight * 0.04 &&
+          image.y < pageHeight * 0.58 &&
+          image.width >= pageWidth * 0.06 &&
+          image.height >= pageHeight * 0.08 &&
+          aspectRatio >= 1 &&
+          aspectRatio <= 1.8
+        );
+      })
+      .sort((a, b) => b.width * b.height - a.width * a.height)[0];
     pushRectCandidate(
       candidates,
       pageIndex,
       'photo',
       '학생 사진',
-      '학교생활기록부 사진 영역',
-      {
+      photoImage ? 'PDF에 포함된 학생 사진 영역' : '학교생활기록부 사진 영역(추정)',
+      photoImage ?? {
         x: pageWidth * 0.77,
         y: pageHeight * 0.145,
         width: pageWidth * 0.175,

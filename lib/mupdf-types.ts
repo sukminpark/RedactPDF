@@ -5,6 +5,7 @@ export interface NativePageText {
   width: number;
   height: number;
   rotation: number;
+  imageBounds: CanvasRect[];
   words: OcrWord[];
   text: string;
 }
@@ -40,7 +41,7 @@ export type MuPdfRequest =
       type: 'validate';
       bytes: ArrayBuffer;
       expectedPages: Array<{ width: number; height: number }>;
-      forbidden: Array<{ pageIndex: number; text: string; quads: PdfQuad[] }>;
+      forbidden: Array<{ pageIndex: number; text: string; quads: Array<{ quad: PdfQuad; text?: string }> }>;
     }
   | { id: string; type: 'cancel' };
 

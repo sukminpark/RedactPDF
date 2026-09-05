@@ -319,6 +319,12 @@ export function startPdfAnalysis(
             },
           })),
         }));
+        const nativeImageBounds = (nativePage?.imageBounds ?? []).map((image) => ({
+          x: image.x * scaleX,
+          y: image.y * scaleY,
+          width: image.width * scaleX,
+          height: image.height * scaleY,
+        }));
         const nativeCharacterCount = nativeWords.reduce((count, word) => count + word.text.length, 0);
         let words: OcrWord[];
         if (nativeWords.length >= 8 && nativeCharacterCount >= 30) {
@@ -363,6 +369,7 @@ export function startPdfAnalysis(
           redactions: detectCandidates(words, enteredNames, {
             pageWidth: canvas.width,
             pageHeight: canvas.height,
+            imageBounds: nativeImageBounds,
           }),
           reviewed: false,
         });
@@ -413,9 +420,11 @@ export async function exportRedactedPdf(
   onProgress: (progress: ProcessingProgress) => void,
 ): Promise<Uint8Array> {
   const client = new MuPdfWorkerClient();
+  let lastProgress = 0;
   try {
     const result = await client.redact(sourceBytes, pages, (progress, pageIndex, message) => {
-      onProgress({ stage: 'exporting', progress, pageIndex, totalPages: pages.length, message: message ?? '선택한 글자를 지우고 있어요.' });
+      lastProgress = Math.max(lastProgress, progress);
+      onProgress({ stage: 'exporting', progress: lastProgress, pageIndex, totalPages: pages.length, message: message ?? '선택한 글자를 지우고 있어요.' });
     });
     onProgress({ stage: 'complete', progress: 100, totalPages: pages.length, message: '빈자리로 영구 삭제된 PDF가 준비됐어요.' });
     return new Uint8Array(result.bytes);

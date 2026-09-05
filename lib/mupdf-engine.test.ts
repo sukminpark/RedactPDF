@@ -5,7 +5,7 @@ import { PDFDocument, StandardFonts, degrees, rgb } from 'pdf-lib';
 import * as mupdf from 'mupdf';
 
 import { extractNativePages, redactPdf, validateRedactedPdf } from './mupdf-engine';
-import { regionTargetsGlyph, unionRects, type RedactionCandidate } from './redaction';
+import { regionTargetsGlyph, unionRects, type PdfQuad, type RedactionCandidate } from './redaction';
 
 function crc32(bytes: Uint8Array): number {
   let crc = 0xffffffff;
@@ -87,7 +87,7 @@ function exactCandidate(pageIndex: number, glyphs: ReturnType<typeof extractNati
     selected: true,
     reason: 'test',
     targetGlyphIds: glyphs.map((glyph) => glyph.id),
-    targetQuads: glyphs.map((glyph) => ({ source: glyph.source, quad: glyph.quad })),
+    targetQuads: glyphs.map((glyph) => ({ source: glyph.source, quad: glyph.quad, text: glyph.text })),
     selectionMode: 'exact-glyphs',
     ...rect,
   };
@@ -123,7 +123,7 @@ describe('MuPDF structure-preserving redaction', () => {
     expect(result[0].text).toContain('LEFT');
     expect(result[0].text).toContain('RIGHT');
     expect(result[0].text).not.toContain('SECRET');
-    expect(validateRedactedPdf(output, [{ width: original[0].width, height: original[0].height }], [{ pageIndex: 0, text: 'SECRET', quads: candidate.targetQuads.map((item) => item.quad) }]).valid).toBe(true);
+    expect(validateRedactedPdf(output, [{ width: original[0].width, height: original[0].height }], [{ pageIndex: 0, text: 'SECRET', quads: candidate.targetQuads }]).valid).toBe(true);
 
     const reopened = new mupdf.PDFDocument(output);
     expect(Object.keys(reopened.getEmbeddedFiles())).toHaveLength(0);
@@ -139,7 +139,7 @@ describe('MuPDF structure-preserving redaction', () => {
     const output = redactPdf(source, [reviewFor(source, candidate)]);
     const text = extractNativePages(output)[0].text;
     expect(text.match(/SECRET/g)).toHaveLength(1);
-    expect(validateRedactedPdf(output, [{ width: original[0].width, height: original[0].height }], [{ pageIndex: 0, text: 'SECRET', quads: candidate.targetQuads.map((item) => item.quad) }]).valid).toBe(true);
+    expect(validateRedactedPdf(output, [{ width: original[0].width, height: original[0].height }], [{ pageIndex: 0, text: 'SECRET', quads: candidate.targetQuads }]).valid).toBe(true);
   });
 
   it('retries the reviewed region when an Office-style glyph link cannot be applied', async () => {
@@ -194,6 +194,29 @@ describe('MuPDF structure-preserving redaction', () => {
     const after = renderPixels(output);
     expect(rgbAt(after, 90, 90).every((channel) => channel >= 245)).toBe(true);
     expect(rgbAt(after, 55, 90)).toEqual(rgbAt(before, 55, 90));
+  });
+
+  it('extracts the actual bounds of an embedded image', async () => {
+    const sourceDocument = await PDFDocument.create();
+    const page = sourceDocument.addPage([200, 200]);
+    const image = await sourceDocument.embedPng(solidPng(20, 20));
+    page.drawImage(image, { x: 40, y: 40, width: 120, height: 80 });
+    const native = extractNativePages(await sourceDocument.save())[0];
+
+    expect(native.imageBounds).toHaveLength(1);
+    expect(native.imageBounds[0]).toMatchObject({ x: 40, y: 80, width: 120, height: 80 });
+  });
+
+  it('does not treat a different overlapping glyph as an undeleted target', async () => {
+    const source = await makeDigitalFixture([{ text: 'KEEP', y: 170 }]);
+    const page = extractNativePages(source)[0];
+    const broadQuad: PdfQuad = [0, 0, page.width, 0, 0, page.height, page.width, page.height];
+
+    expect(validateRedactedPdf(source, [{ width: page.width, height: page.height }], [{
+      pageIndex: 0,
+      text: 'SECRET',
+      quads: [{ quad: broadQuad, text: 'SECRET' }],
+    }]).valid).toBe(true);
   });
 });
 

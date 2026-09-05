@@ -90,6 +90,19 @@ describe('detectCandidates', () => {
     expect(result.some((item) => item.kind === 'class' && item.sourceText === '3')).toBe(true);
     expect(result.some((item) => item.kind === 'student-number' && item.sourceText === '12')).toBe(true);
   });
+
+  it('uses the embedded portrait bounds instead of a template position guess', () => {
+    const imageBounds = { x: 760, y: 290, width: 145, height: 190 };
+    const result = detectCandidates(wordsFromLine(['학교생활기록부']), [], {
+      pageWidth: 1000,
+      pageHeight: 1400,
+      imageBounds: [imageBounds],
+    });
+    expect(result.find((item) => item.kind === 'photo')).toMatchObject({
+      ...imageBounds,
+      reason: 'PDF에 포함된 학생 사진 영역',
+    });
+  });
 });
 
 const samplePath = resolve('sample', '4세대 나이스 시스템.pdf');
