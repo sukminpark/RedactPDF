@@ -174,6 +174,51 @@ describe('detectCandidates', () => {
     expect(identity.some((item) => item.kind === 'class' && item.sourceText === '3')).toBe(true);
   });
 
+  it('does not treat a subject category after a slash as a footer outputter', () => {
+    const words = wordsFromLine(['국어·한문/교양']);
+    words.forEach((word) => {
+      word.bbox.y = 1120;
+      word.glyphs.forEach((glyph) => { glyph.bbox.y = 1120; });
+    });
+    const result = detectCandidates(words, [], { pageWidth: 900, pageHeight: 1200 });
+    expect(result.some((item) => item.kind === 'outputter')).toBe(false);
+
+    const outputter = wordsFromLine(['기록/홍길동']);
+    outputter.forEach((word) => {
+      word.bbox.y = 1120;
+      word.glyphs.forEach((glyph) => { glyph.bbox.y = 1120; });
+    });
+    const outputterResult = detectCandidates(outputter, [], { pageWidth: 900, pageHeight: 1200 });
+    expect(outputterResult.some((item) => item.kind === 'outputter' && item.sourceText === '홍길동')).toBe(true);
+  });
+
+  it('finds class, number, and name cells in a correction ledger', () => {
+    const words = wordsFromLine(['정정대장', '성', '명', '항', '목', '11반', '9', '홍길동']);
+    const place = (word: OcrWord, x: number, y: number, lineId: string) => {
+      const deltaX = x - word.bbox.x;
+      const deltaY = y - word.bbox.y;
+      word.bbox = { ...word.bbox, x, y };
+      word.lineId = lineId;
+      word.glyphs.forEach((glyph) => {
+        glyph.bbox = { ...glyph.bbox, x: glyph.bbox.x + deltaX, y: glyph.bbox.y + deltaY };
+      });
+    };
+    place(words[0], 30, 10, 'ledger-title');
+    place(words[1], 205, 20, 'ledger-header');
+    place(words[2], 222, 20, 'ledger-header');
+    place(words[3], 264, 20, 'ledger-header');
+    place(words[4], 284, 20, 'ledger-header');
+    place(words[5], 166, 70, 'ledger-row');
+    words[5].bbox.width = 22;
+    place(words[6], 191, 70, 'ledger-row');
+    place(words[7], 205, 70, 'ledger-row');
+
+    const result = detectCandidates(words, []);
+    expect(result.some((item) => item.kind === 'class' && item.sourceText === '11')).toBe(true);
+    expect(result.some((item) => item.kind === 'student-number' && item.sourceText === '9')).toBe(true);
+    expect(result.some((item) => item.kind === 'student-name' && item.sourceText === '홍길동' && item.reason === '정정대장 성명 열')).toBe(true);
+  });
+
   it('uses the embedded portrait bounds instead of a template position guess', () => {
     const imageBounds = { x: 760, y: 290, width: 145, height: 190 };
     const result = detectCandidates(wordsFromLine(['학교생활기록부']), [], {

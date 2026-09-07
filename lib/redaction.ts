@@ -84,6 +84,9 @@ export interface PageReviewState {
 // than a name field. Require an explicit guardian-name label before treating
 // the neighboring text as personally identifying information.
 const LABELS = ['보호자성명', '보호자이름', '보호자명', '성명', '이름', '신청인', '신청자', '민원인', '대표자'];
+// A slash at the end of a subject category is not an output-person field.
+// This is intentionally limited to the legacy footer shorthand rule.
+const OUTPUTTER_CATEGORY_TERMS = new Set(['교양', '국어', '수학', '영어', '과학', '사회', '예술', '체육']);
 // MuPDF image redaction clips a fractional image edge as an open boundary.
 // Keep two render-canvas pixels below an embedded portrait so the last raster
 // row is deleted too; this is part of the actual photo candidate, not UI-only
@@ -388,6 +391,11 @@ function isKoreanName(value: string): boolean {
   return /^[가-힣]{2,5}$/.test(normalizeCompact(value));
 }
 
+function isLikelyFooterOutputter(value: string): boolean {
+  const compact = normalizeCompact(value);
+  return isKoreanName(compact) && !OUTPUTTER_CATEGORY_TERMS.has(compact);
+}
+
 function nameFieldLabel(word: OcrWord): string | undefined {
   const raw = word.text.normalize('NFKC').trim();
   const compact = normalizeCompact(raw);
@@ -589,7 +597,7 @@ function findSchoolRecordFields(
   for (const [lineIndex, words] of lines.entries()) {
     const lineText = words.map((word) => word.text).join('');
     const footerMatch = lineText.match(/\/([가-힣]{2,5})\s*$/);
-    if (footerMatch && words.some((word) => word.bbox.y > pageHeight * 0.88)) {
+    if (footerMatch && isLikelyFooterOutputter(footerMatch[1]) && words.some((word) => word.bbox.y > pageHeight * 0.88)) {
       const outputterName = footerMatch[1];
       const exactWord = [...words].reverse().find((word) => normalizeCompact(word.text) === outputterName);
       if (exactWord) {
@@ -750,6 +758,82 @@ function findSchoolRecordFields(
   }
 }
 
+function wordFromGlyphs(template: OcrWord, glyphs: TextGlyph[]): OcrWord {
+  return {
+    ...template,
+    id: `${template.id}-glyph-slice-${glyphs[0]?.id ?? 'empty'}`,
+    text: glyphs.map((glyph) => glyph.text).join(''),
+    bbox: unionRects(glyphs.map((glyph) => glyph.bbox)),
+    glyphs,
+  };
+}
+
+function findCorrectionLedgerFields(allWords: OcrWord[], candidates: RedactionCandidate[]): void {
+  if (!allWords.some((word) => normalizeCompact(word.text).includes('정정대장'))) return;
+
+  const glyphs = allWords.flatMap((word) => word.glyphs);
+  const nameHeaderStart = glyphs.find((glyph) =>
+    glyph.text === '성' && glyphs.some((next) =>
+      next.text === '명' &&
+      next.bbox.x > glyph.bbox.x &&
+      next.bbox.x - glyph.bbox.x < 30 &&
+      Math.abs(next.bbox.y - glyph.bbox.y) < 8,
+    ),
+  );
+  if (!nameHeaderStart) return;
+  const nameHeaderEnd = glyphs.find((glyph) =>
+    glyph.text === '명' &&
+    glyph.bbox.x > nameHeaderStart.bbox.x &&
+    glyph.bbox.x - nameHeaderStart.bbox.x < 30 &&
+    Math.abs(glyph.bbox.y - nameHeaderStart.bbox.y) < 8,
+  );
+  const nextColumnHeader = glyphs.find((glyph) =>
+    glyph.text === '항' &&
+    glyph.bbox.x > (nameHeaderEnd?.bbox.x ?? nameHeaderStart.bbox.x) &&
+    glyph.bbox.x - (nameHeaderEnd?.bbox.x ?? nameHeaderStart.bbox.x) < 80 &&
+    Math.abs(glyph.bbox.y - nameHeaderStart.bbox.y) < 8,
+  );
+  if (!nameHeaderEnd || !nextColumnHeader) return;
+
+  const nameColumnLeft = nameHeaderStart.bbox.x - 8;
+  const nameColumnRight = (nameHeaderEnd.bbox.x + nameHeaderEnd.bbox.width + nextColumnHeader.bbox.x) / 2;
+  const classRows = allWords.filter((word) => /(\d{1,2})\s*반/.test(word.text.normalize('NFKC')));
+
+  for (const classWord of classRows) {
+    const classMatch = classWord.text.normalize('NFKC').match(/(\d{1,2})\s*반/);
+    if (!classMatch) continue;
+    pushWordSliceCandidate(candidates, classWord, classMatch[1], 'class', '정정대장 학급(반) 열');
+
+    const classCenterY = classWord.bbox.y + classWord.bbox.height / 2;
+    const numberWord = allWords.find((word) => {
+      if (word.id === classWord.id) return false;
+      const value = word.text.normalize('NFKC');
+      if (!/^(\d{1,3})\s*번?$/.test(value)) return false;
+      const centerY = word.bbox.y + word.bbox.height / 2;
+      return (
+        Math.abs(centerY - classCenterY) <= Math.max(classWord.bbox.height, word.bbox.height) * 1.4 &&
+        word.bbox.x >= classWord.bbox.x + classWord.bbox.width - 2 &&
+        word.bbox.x < nameColumnLeft
+      );
+    });
+    const numberMatch = numberWord?.text.normalize('NFKC').match(/^(\d{1,3})\s*번?$/);
+    if (numberWord && numberMatch) {
+      pushWordSliceCandidate(candidates, numberWord, numberMatch[1], 'student-number', '정정대장 번호 열');
+    }
+
+    const nameGlyphs = glyphs.filter((glyph) => {
+      const centerY = glyph.bbox.y + glyph.bbox.height / 2;
+      const onRow = Math.abs(centerY - classCenterY) <= Math.max(classWord.bbox.height, glyph.bbox.height) * 1.8;
+      const inNameColumn = glyph.bbox.x >= nameColumnLeft && glyph.bbox.x + glyph.bbox.width <= nameColumnRight;
+      return onRow && inNameColumn && /^[가-힣]$/.test(glyph.text);
+    });
+    const name = nameGlyphs.map((glyph) => glyph.text).join('');
+    if (isKoreanName(name)) {
+      pushCandidate(candidates, [wordFromGlyphs(classWord, nameGlyphs)], 'student-name', name, '정정대장 성명 열');
+    }
+  }
+}
+
 export function detectCandidates(
   words: OcrWord[],
   enteredNames: string[],
@@ -761,6 +845,7 @@ export function detectCandidates(
   findEnteredNames(lines, enteredNames, candidates);
   findDetectedNames(lines, words, candidates);
   findSchoolRecordFields(lines, words, candidates, context);
+  findCorrectionLedgerFields(words, candidates);
   return candidates;
 }
 
