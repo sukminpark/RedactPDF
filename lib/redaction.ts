@@ -804,6 +804,11 @@ function findCorrectionLedgerFields(allWords: OcrWord[], candidates: RedactionCa
     if (!classMatch) continue;
     pushWordSliceCandidate(candidates, classWord, classMatch[1], 'class', '정정대장 학급(반) 열');
 
+    const inlineNumber = classWord.text.normalize('NFKC').match(/\d{1,2}\s*반\s*(\d{1,3})\s*번?/);
+    if (inlineNumber) {
+      pushWordSliceCandidate(candidates, classWord, inlineNumber[1], 'student-number', '정정대장 번호 열');
+    }
+
     const classCenterY = classWord.bbox.y + classWord.bbox.height / 2;
     const numberWord = allWords.find((word) => {
       if (word.id === classWord.id) return false;
@@ -812,7 +817,7 @@ function findCorrectionLedgerFields(allWords: OcrWord[], candidates: RedactionCa
       const centerY = word.bbox.y + word.bbox.height / 2;
       return (
         Math.abs(centerY - classCenterY) <= Math.max(classWord.bbox.height, word.bbox.height) * 1.4 &&
-        word.bbox.x >= classWord.bbox.x + classWord.bbox.width - 2 &&
+        word.bbox.x >= classWord.bbox.x - classWord.bbox.width * 1.2 &&
         word.bbox.x < nameColumnLeft
       );
     });

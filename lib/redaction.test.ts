@@ -217,6 +217,18 @@ describe('detectCandidates', () => {
     expect(result.some((item) => item.kind === 'class' && item.sourceText === '11')).toBe(true);
     expect(result.some((item) => item.kind === 'student-number' && item.sourceText === '9')).toBe(true);
     expect(result.some((item) => item.kind === 'student-name' && item.sourceText === '홍길동' && item.reason === '정정대장 성명 열')).toBe(true);
+
+    const inline = wordsFromLine(['정정대장', '성', '명', '항', '목', '11반 9번', '홍길동']);
+    place(inline[0], 30, 10, 'ledger-title');
+    place(inline[1], 205, 20, 'ledger-header');
+    place(inline[2], 222, 20, 'ledger-header');
+    place(inline[3], 264, 20, 'ledger-header');
+    place(inline[4], 284, 20, 'ledger-header');
+    place(inline[5], 166, 70, 'ledger-row');
+    inline[5].bbox.width = 28;
+    place(inline[6], 205, 70, 'ledger-row');
+    const inlineResult = detectCandidates(inline, []);
+    expect(inlineResult.some((item) => item.kind === 'student-number' && item.sourceText === '9')).toBe(true);
   });
 
   it('uses the embedded portrait bounds instead of a template position guess', () => {
