@@ -6,7 +6,7 @@
 
 - 공개 서비스: https://garim-pdf.papermbl.chatgpt.site
 - 로컬 저장소: `D:\AI_club\RedactPDF`
-- 개인정보가 없는 단일 루트 커밋으로 공개 이력을 초기화한 뒤, 이후 수정 커밋만 추가했다. GitHub와 Sites 소스 `main`은 같은 최신 SHA여야 한다.
+- 개인정보가 없는 단일 루트 커밋으로 공개 이력을 초기화한 뒤, 이후 수정 커밋만 추가했다. GitHub `main`에는 최신 인수인계 전용 커밋이 하나 더 있을 수 있으며, 공개 앱 코드의 Sites 소스 `main`은 버전 22 배포 커밋(`72c3abd`)이다.
 - GitHub와 Sites의 공개 참조는 `main` 하나만 남겼다.
 - Sites 공개 배포는 버전 22까지 완료됐다: `https://garim-pdf.papermbl.chatgpt.site`
 
