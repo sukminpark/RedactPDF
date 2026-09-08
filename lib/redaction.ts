@@ -685,8 +685,16 @@ function findSchoolRecordFields(
 
     const addressLabelIndex = words.findIndex((word) => /^주소:?$/.test(normalizeCompact(word.text)));
     if (addressLabelIndex !== -1) {
-      const addressWords = words.slice(addressLabelIndex + 1).filter((word) => word.bbox.x > words[addressLabelIndex].bbox.x);
       const label = words[addressLabelIndex];
+      const labelCenterY = label.bbox.y + label.bbox.height / 2;
+      // Government24 exports can assign successive table rows to one PDF text
+      // line. Keep the first address row visual rather than logical: otherwise
+      // academic-history text below the address becomes one oversized mask.
+      const addressWords = words.slice(addressLabelIndex + 1).filter((word) => {
+        const centerY = word.bbox.y + word.bbox.height / 2;
+        const sameVisualRow = Math.abs(centerY - labelCenterY) <= Math.max(label.bbox.height, word.bbox.height) * 1.15;
+        return sameVisualRow && word.bbox.x > label.bbox.x;
+      });
       if (addressWords.length > 0) {
         const addressRect = unionRects(addressWords.map((word) => word.bbox), 5);
         const likelyWraps =

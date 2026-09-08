@@ -192,6 +192,17 @@ describe('detectCandidates', () => {
     expect(outputterResult.some((item) => item.kind === 'outputter' && item.sourceText === '홍길동')).toBe(true);
   });
 
+  it('keeps a Government24 address mask on its visual row when PDF line IDs span table rows', () => {
+    const words = wordsFromLine(['주소', '경기도안산시', '학적사항내용']);
+    words[2].bbox.y = 70;
+    words[2].glyphs.forEach((glyph) => { glyph.bbox.y = 70; });
+    const result = detectCandidates(words, []);
+    const address = result.find((item) => item.kind === 'address');
+    expect(address).toBeDefined();
+    expect(address!.y + address!.height).toBeLessThan(50);
+    expect(address!.width).toBeLessThan(words[2].bbox.x - address!.x);
+  });
+
   it('finds class, number, and name cells in a correction ledger', () => {
     const words = wordsFromLine(['정정대장', '성', '명', '항', '목', '11반', '9', '홍길동']);
     const place = (word: OcrWord, x: number, y: number, lineId: string) => {
