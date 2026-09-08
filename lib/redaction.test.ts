@@ -350,6 +350,15 @@ describe('geometry and validation', () => {
     expect(aligned[0].glyphs[0]).toMatchObject({ id: native[0].glyphs[0].id, canonicalQuad: native[0].glyphs[0].canonicalQuad, bbox: rendered[0].glyphs[0].bbox });
   });
 
+  it('does not amplify slight source skew into a different rendered row', () => {
+    const canonical = canonicalGlyphQuad(
+      [400, 700, 410, 700, 401, 710, 411, 710],
+      { x: 400, y: 100, width: 10, height: 20 },
+      { pdfToCanvas: [1, 0, 0, 1, 0, 0], canvasToPdf: [1, 0, 0, 1, 0, 0] },
+    );
+    expect(quadBounds(canonical)).toMatchObject({ x: 400, width: 11, y: 100, height: 20 });
+  });
+
   it('round-trips rotated CropBox coordinates through an affine transform', () => {
     const pdfToCanvas: AffineMatrix = [0, 2, 2, 0, -40, -20];
     const canvasToPdf = invertAffine(pdfToCanvas);

@@ -51,8 +51,13 @@ function normalized(vector: PdfPoint): PdfPoint | null {
 export function canonicalGlyphQuad(sourcePdfQuad: PdfQuad, renderedBounds: CanvasRect, transform: Pick<PageTransform, 'pdfToCanvas' | 'canvasToPdf'>): PdfQuad {
   const source = transformQuad(transform.pdfToCanvas, sourcePdfQuad);
   const direction = normalized([source[2] - source[0], source[3] - source[1]]);
-  const normal = normalized([source[4] - source[0], source[5] - source[1]]);
-  if (!direction || !normal || Math.abs(direction[0] * normal[0] + direction[1] * normal[1]) > 0.2) return transformQuad(transform.canvasToPdf, rectQuad(renderedBounds));
+  const sourceNormal = normalized([source[4] - source[0], source[5] - source[1]]);
+  if (!direction || !sourceNormal || Math.abs(direction[0] * sourceNormal[0] + direction[1] * sourceNormal[1]) > 0.2) return transformQuad(transform.canvasToPdf, rectQuad(renderedBounds));
+  // Projection and reconstruction need an orthonormal basis. A tiny skew in
+  // an Office-style height edge otherwise gets amplified by absolute page
+  // coordinates and can move one glyph into a neighboring table row.
+  const normalSign = (-direction[1] * sourceNormal[0] + direction[0] * sourceNormal[1]) < 0 ? -1 : 1;
+  const normal: PdfPoint = [-direction[1] * normalSign, direction[0] * normalSign];
   const sourcePoints: PdfPoint[] = [[source[0], source[1]], [source[2], source[3]], [source[4], source[5]], [source[6], source[7]]];
   const rendered = rectQuad(renderedBounds);
   const renderedPoints: PdfPoint[] = [[rendered[0], rendered[1]], [rendered[2], rendered[3]], [rendered[4], rendered[5]], [rendered[6], rendered[7]]];
