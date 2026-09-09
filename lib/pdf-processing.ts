@@ -13,6 +13,7 @@ import {
 } from './redaction';
 import { MuPdfWorkerClient } from './mupdf-client';
 import { PdfProcessingError } from './mupdf-types';
+import { deploymentAssetPath } from './deployment-path';
 
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_PAGES = 50;
@@ -322,7 +323,7 @@ export function startPdfAnalysis(
     reportProgress({ stage: 'loading', progress: 1, message: 'PDF 구조를 확인하고 있어요.' });
 
     const pdfjs = await import('pdfjs-dist');
-    pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
+    pdfjs.GlobalWorkerOptions.workerSrc = deploymentAssetPath('pdf.worker.min.mjs');
     const sourceBytes = await file.arrayBuffer();
     mupdfClient = new MuPdfWorkerClient();
     const nativePages = await mupdfClient.extract(sourceBytes, password, (progress, pageIndex, message) => {
@@ -352,8 +353,8 @@ export function startPdfAnalysis(
         if (worker) return worker;
         const { createWorker, OEM } = await import('tesseract.js');
         worker = await createWorker(['kor', 'eng'], OEM.LSTM_ONLY, {
-          workerPath: '/tesseract/worker.min.js',
-          corePath: '/tesseract/core',
+          workerPath: deploymentAssetPath('tesseract/worker.min.js'),
+          corePath: deploymentAssetPath('tesseract/core'),
           langPath: '/tessdata',
           gzip: true,
           logger: (status) => {

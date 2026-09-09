@@ -16,6 +16,8 @@ interface Document {
   };
 }
 declare const __SOURCE_COMMIT__: string;
+declare const __APP_BASE_PATH__: string;
+declare const __PUBLIC_CANONICAL_URL__: string;
 
 declare module '*?worker' {
   const WorkerFactory: new (options?: WorkerOptions) => Worker;

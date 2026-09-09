@@ -10,6 +10,15 @@ const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
 
 const { d1, r2 } = hostingConfig;
 
+function normalizeBasePath(rawPath: string | undefined): string {
+  const trimmed = rawPath?.trim() || '/';
+  if (trimmed === '/') return '/';
+  return `/${trimmed.replace(/^\/+|\/+$/g, '')}/`;
+}
+
+const deploymentBasePath = normalizeBasePath(process.env.REDACT_PDF_BASE_PATH);
+const publicCanonicalUrl = process.env.REDACT_PDF_CANONICAL_URL || 'https://garim-pdf.papermbl.chatgpt.site/';
+
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === 'seatbelt';
 
@@ -54,8 +63,11 @@ export default defineConfig(async () => {
   const { cloudflare } = await import('@cloudflare/vite-plugin');
 
   return {
+    base: deploymentBasePath,
     define: {
       __SOURCE_COMMIT__: JSON.stringify(sourceCommit),
+      __APP_BASE_PATH__: JSON.stringify(deploymentBasePath),
+      __PUBLIC_CANONICAL_URL__: JSON.stringify(publicCanonicalUrl),
     },
     worker: {
       format: 'es' as const,
