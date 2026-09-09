@@ -1,5 +1,67 @@
 # 가림PDF 인수인계
 
+## 2026-09-09 현재 상태 — AI세특 직접 정적 통합
+
+이 절은 아래의 과거 탐지 보정 기록보다 최신 상태다. 가림PDF의 AI세특 통합은 완료되어 `https://aisetuk.com/redact-pdf/`에서 원본 앱과 같은 런타임을 직접 제공한다. Vue 앱 셸 또는 iframe은 이 경로를 감싸지 않는다.
+
+### 사용자에게 보이는 현재 결과
+
+- `https://aisetuk.com/redact-pdf`는 Firebase Hosting의 정적 디렉터리 규칙으로 한 번만 `https://aisetuk.com/redact-pdf/`로 301 이동하고, 후자는 200으로 원본 가림PDF를 제공한다. 두 주소 사이의 리디렉션 루프는 해소됐다.
+- 원본 가림PDF의 상단 앱바가 표시되고, PDF.js·OCR·MuPDF 워커와 정적 자산은 모두 `/redact-pdf/` 하위 경로에서 로드된다.
+- AI세특 푸터의 도구 표기는 **`PDF 개인정보 삭제`**이며, 모든 정적 페이지와 Vue 앱 푸터가 `/redact-pdf/`를 직접 가리킨다.
+- 실제 배포 후 `https://aisetuk.com/`의 푸터 문구, `https://aisetuk.com/redact-pdf/`의 앱바와 canonical을 HTTP 응답으로 확인했다.
+
+### 원인과 해결의 핵심
+
+- 이전 포함본은 별도 복사본이었고 `body > main > header { display: none !important; }`를 주입해 원본 앱바를 숨겼다. 또한 워커·자산 경로가 독립 사이트의 루트 기준이라 하위 경로에서 런타임 차이가 났다.
+- 이 주입 CSS와 예전 `public/redact-pdf-runtime/` 복사본은 제거했다. AI세특에는 원본 프로젝트의 정적 릴리스만 동기화한다. `public/redact-pdf/` 파일을 AI세특에서 직접 수정하지 말 것.
+- Firebase에서 물리적 `redact-pdf/` 디렉터리는 slash 없는 주소를 slash 있는 주소로 보정한다. `/redact-pdf/`를 다시 `/redact-pdf`로 보내던 수동 redirect가 두 주소의 301 루프 원인이었다. 그 redirect를 삭제했고, 대표 URL·canonical·Open Graph·sitemap을 모두 trailing slash 형식으로 통일했다.
+
+### 원본 프로젝트 — `D:\AI_club\RedactPDF`
+
+- 현재 코드 커밋: `e2b740f97531a0baf361a9a7b51e584717317985` (`Support subpath static releases`). GitHub `main`에는 푸시됐다.
+- 핵심 구현:
+  - `vite.config.ts`: `REDACT_PDF_BASE_PATH`와 `REDACT_PDF_CANONICAL_URL`로 Vite base, runtime 상수, 메타데이터를 설정한다.
+  - `lib/deployment-path.ts`: 동일 origin의 base path 자산 URL을 조합한다.
+  - `app/layout.tsx`: favicon, canonical, Open Graph URL을 배포 base/canonical에 맞춘다.
+  - `lib/pdf-processing.ts`: PDF.js worker와 Tesseract worker/core 경로를 `deploymentAssetPath()`로 만든다.
+  - `scripts/export-static.mjs`: 원본 앱을 빌드·로컬 렌더 후 앱바가 보이는지 확인하고 정적 산출물과 `release.json`을 만든다. `release.json`은 source commit, builtAt, basePath, canonicalUrl, 전체 파일 SHA-256을 담는다.
+- 원본 검증: `npm run lint`, `npx tsc --noEmit`, `npm test -- --run` (49 passed, 2 skipped), production build를 통과했다.
+- 알려진 로컬 주의: `export-static.mjs`가 띄운 Wrangler 프로세스가 비정상 종료 시 `dist/client`를 잠글 수 있다. `RedactPDF` 경로를 명시한 Wrangler child process만 종료한 뒤 다시 빌드한다. 다른 Node/Firebase 프로세스는 종료하지 않는다.
+
+### AI세특 프로젝트 — `D:\st2`
+
+- 현재 커밋: `f6d17091c5631004095fba3294bca3c29254bd75` (`Rename PDF privacy tool footer link`). GitHub `https://github.com/sukminpark/st2.git`의 `main`에 푸시됐고 Firebase Hosting `studentremark-helper`에도 배포됐다.
+- 통합 커밋 흐름:
+  - `72bf899` — 원본 가림PDF를 `/redact-pdf/` 직접 정적 런타임으로 포함.
+  - `a716273` — Firebase redirect loop를 제거하고 trailing-slash canonical으로 정규화.
+  - `75115bd` — 푸터 링크가 `/redact-pdf/`를 직접 가리키도록 수정.
+  - `f6d1709` — 푸터 표시 문구를 `PDF 개인정보 삭제`로 변경.
+- `scripts/sync-redact-pdf-runtime.mjs`만 원본 export script를 실행해 `public/redact-pdf/`를 만든다. base는 `/redact-pdf/`, canonical은 `https://aisetuk.com/redact-pdf/`다.
+- `scripts/verify-redact-pdf-runtime.mjs`는 release metadata, 앱바 존재/숨김 CSS 부재, canonical, scoped asset URL, worker 참조·파일 존재, 전체 SHA-256을 확인한다. 루트 `npm run build`의 `prebuild`에서 항상 실행된다.
+- `firebase.json`에는 `/redact-pdf` → `/redact-pdf/index.html` rewrite가 있다. `/redact-pdf/` → `/redact-pdf` redirect를 다시 추가하면 안 된다. `vue.config.js`의 dev rewrite도 직접 정적 index를 가리킨다.
+- 최신 릴리스 metadata는 원본 커밋 `e2b740f97531` 기반, canonical `https://aisetuk.com/redact-pdf/`, runtime SHA-256 `7f7efce555300c20d47ced323af8ddb35ac066acb85c9c1e626a1b78a8b65286`이다.
+
+### 배포 상태와 다음 세션의 남은 일
+
+- AI세특 Firebase Hosting 배포는 완료됐다. 다음 변경 전 기본 검증은 `npm run build`, `node scripts/verify-redact-pdf-runtime.mjs`, 배포 후 두 URL의 HTTP status/Location 확인이다.
+- 원본 가림PDF GitHub에는 `e2b740f`가 반영됐지만 Sites 원격 배포는 아직 보류다. 사용자는 일반적인 Sites 원격 푸시를 승인했으나 보안 실행기가 **정확한 외부 URL과 소스 전송 승인**을 다시 요구해 차단했다.
+- Sites 배포를 재개하려면 사용자가 아래 문구를 정확히 승인해야 한다. 승인 전 우회·재시도하지 말 것.
+
+```text
+RedactPDF main의 소스 코드를 https://git.chatgpt-team.site/7e162a63-42f6-44e1-bb50-c7a48d0c7792/appgprj_6a97b4a1ce6c8191ab62cbbdffdb162a.git 에 푸시하여 Sites 배포하는 것을 승인합니다.
+```
+
+- 승인 후 `D:\AI_club\RedactPDF`에서 `git -c safe.directory=D:/AI_club/RedactPDF push origin main`을 실행하고, Sites의 자동 배포 결과를 확인한다. 이 원격에는 사용자 PDF·샘플·로그를 절대 포함하지 않는다.
+
+### 다음 세션 시작 순서
+
+1. 이 문서와 `D:\st2\docs\REDACT_PDF_HANDOFF.md`를 읽고 두 작업 트리의 `git status --short`를 먼저 확인한다.
+2. 가림PDF 기능 변경이면 원본 저장소에서 수정·테스트·커밋하고, AI세특에서는 `npm run sync:redact-pdf`로만 포함본을 새로 만든다.
+3. `D:\st2`에서 `npm run build`가 통과하고 release hash가 일치한 뒤에만 Firebase Hosting을 배포한다.
+4. 독립 Sites 공개본도 갱신해야 하면 위의 정확한 원격 승인 여부를 확인한 후에만 push한다.
+5. 아래에 남은 정부24 후보 범위 문제를 계속 조사할 때는 개인정보 원본을 Git·배포·외부 로그에 넣지 않는다.
+
 ## 서비스와 개인정보 원칙
 
 가림PDF는 학교생활기록부·대입전형자료의 개인정보를 브라우저 안에서 탐지하고 원본 PDF 구조를 유지한 채 영구 삭제하는 Vinext/React/TypeScript 앱이다. 사용자 PDF, 비밀번호, 생성 결과는 서버·브라우저 저장소·Git·외부 OCR 서비스에 보내거나 남기지 않는다.
