@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="가림PDF">
-  <circle cx="32" cy="32" r="29" fill="#0F5B36"/>
-  <path fill="#fff" d="M21 15a4 4 0 0 0-4 4v27a4 4 0 0 0 4 4h22a4 4 0 0 0 4-4V29L35 15H21Zm14 2.8L44.2 28H37a2 2 0 0 1-2-2v-8.2Z"/>
-  <path fill="#BFEBCD" d="M24 28h10a2 2 0 1 1 0 4H24a2 2 0 1 1 0-4Z"/>
-  <rect x="24" y="35" width="17" height="4" rx="1.5" fill="#0B3F28"/>
-  <rect x="24" y="42" width="17" height="4" rx="1.5" fill="#0B3F28"/>
+  <circle cx="32" cy="32" r="31" fill="#0F5B36"/>
+  <path fill="#fff" d="M16 9a4 4 0 0 0-4 4v38a4 4 0 0 0 4 4h31a4 4 0 0 0 4-4V24L36 9H16Zm20 3.2L47.8 24H40a4 4 0 0 1-4-4v-7.8Z"/>
+  <rect x="20" y="29" width="24" height="5" rx="2" fill="#BFEBCD"/>
+  <rect x="20" y="38" width="24" height="5" rx="2" fill="#0B3F28"/>
+  <rect x="20" y="47" width="19" height="5" rx="2" fill="#0B3F28"/>
 </svg>

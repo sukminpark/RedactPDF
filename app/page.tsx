@@ -123,8 +123,8 @@ function Header({ onReset, hasDocument }: { onReset: () => void; hasDocument: bo
     <header className="border-b border-border/80 bg-background/95 backdrop-blur">
       <div className="mx-auto flex h-16 max-w-[1600px] items-center justify-between px-4 sm:px-6 lg:px-8">
         <div className="flex items-center gap-3">
-          <span className="grid size-9 shrink-0 place-items-center">
-            <img src={deploymentAssetPath("favicon.svg")} alt="" className="size-9" />
+          <span className="grid size-10 shrink-0 place-items-center">
+            <img src={deploymentAssetPath("favicon.svg")} alt="" className="size-10" />
           </span>
           <div>
             <p className="text-[15px] font-bold tracking-[-0.02em]">가림PDF</p>
