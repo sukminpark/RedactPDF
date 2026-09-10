@@ -30,6 +30,17 @@ import {
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogMedia,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
@@ -52,6 +63,7 @@ import {
   type AnalysisTask,
 } from '@/lib/pdf-processing';
 import { PdfProcessingError } from '@/lib/mupdf-types';
+import { deploymentAssetPath } from '@/lib/deployment-path';
 import {
   mergeAutomaticCandidates,
   sanitizeDownloadName,
@@ -111,8 +123,8 @@ function Header({ onReset, hasDocument }: { onReset: () => void; hasDocument: bo
     <header className="border-b border-border/80 bg-background/95 backdrop-blur">
       <div className="mx-auto flex h-16 max-w-[1600px] items-center justify-between px-4 sm:px-6 lg:px-8">
         <div className="flex items-center gap-3">
-          <span className="grid size-9 place-items-center rounded-xl bg-primary text-primary-foreground shadow-sm">
-            <ShieldCheck className="size-5" aria-hidden="true" />
+          <span className="grid size-9 shrink-0 place-items-center">
+            <img src={deploymentAssetPath("favicon.svg")} alt="" className="size-9" />
           </span>
           <div>
             <p className="text-[15px] font-bold tracking-[-0.02em]">가림PDF</p>
@@ -167,6 +179,7 @@ export default function Home() {
   const [zoom, setZoom] = useState(0.46);
   const [draftRect, setDraftRect] = useState<CanvasRect | null>(null);
   const [isSummaryOpen, setIsSummaryOpen] = useState(false);
+  const [isUnreviewedExportOpen, setIsUnreviewedExportOpen] = useState(false);
   const [passwordPrompt, setPasswordPrompt] = useState<'required' | 'incorrect' | null>(null);
   const [passwordInput, setPasswordInput] = useState('');
 
@@ -254,6 +267,7 @@ export default function Home() {
     setManualMode(false);
     setDraftRect(null);
     setIsSummaryOpen(false);
+    setIsUnreviewedExportOpen(false);
     passwordRef.current = undefined;
     pendingPasswordFileRef.current = null;
     setPasswordPrompt(null);
@@ -342,6 +356,7 @@ export default function Home() {
 
   const currentPage = pages[currentPageIndex];
   const allReviewed = pages.length > 0 && pages.every((page) => page.reviewed);
+  const unreviewedCount = pages.filter((page) => !page.reviewed).length;
   const selectedCount = useMemo(
     () => pages.reduce((count, page) => count + page.redactions.filter((item) => item.selected).length, 0),
     [pages],
@@ -355,6 +370,12 @@ export default function Home() {
     },
     [currentPageIndex],
   );
+
+  const setPageReviewed = useCallback((pageIndex: number, reviewed: boolean) => {
+    setPages((current) =>
+      current.map((page) => (page.pageIndex === pageIndex ? { ...page, reviewed } : page)),
+    );
+  }, []);
 
   const updateRedactionOnPage = useCallback(
     (
@@ -496,17 +517,16 @@ export default function Home() {
     [currentPage, currentPageIndex, draftRect, updateCurrentPage],
   );
 
-  const downloadResult = useCallback(async (approveAllPages = false) => {
-    const pagesToExport = approveAllPages
+  const downloadResult = useCallback(async (markAllReviewed = false) => {
+    const pagesToExport = markAllReviewed
       ? pages.map((page) => ({ ...page, reviewed: true }))
       : pages;
-    const ready = pagesToExport.length > 0 && pagesToExport.every((page) => page.reviewed);
     const exportSelectionCount = pagesToExport.reduce(
       (count, page) => count + page.redactions.filter((item) => item.selected).length,
       0,
     );
-    if (!file || !ready || exportSelectionCount === 0) return;
-    if (approveAllPages) {
+    if (!file || pagesToExport.length === 0 || exportSelectionCount === 0) return;
+    if (markAllReviewed) {
       setPages(pagesToExport);
       setIsSummaryOpen(false);
     }
@@ -548,6 +568,14 @@ export default function Home() {
       setError(exportError instanceof Error ? exportError.message : '새 PDF를 만들지 못했습니다.');
     }
   }, [file, pages]);
+
+  const requestDownload = useCallback(() => {
+    if (!allReviewed) {
+      setIsUnreviewedExportOpen(true);
+      return;
+    }
+    void downloadResult();
+  }, [allReviewed, downloadResult]);
 
   const isProcessing = ['loading', 'rendering', 'ocr'].includes(stage);
   const isWorkspace = pages.length > 0;
@@ -750,8 +778,8 @@ export default function Home() {
               </Button>
               <Button
                 className="h-9 px-4"
-                disabled={!allReviewed || selectedCount === 0 || stage === 'exporting'}
-                onClick={() => void downloadResult()}
+                disabled={selectedCount === 0 || stage === 'exporting'}
+                onClick={requestDownload}
               >
                 <Download aria-hidden="true" />
                 {stage === 'exporting' ? `${progress}%` : '비식별화 PDF 저장'}
@@ -775,27 +803,37 @@ export default function Home() {
               <p className="px-2 pb-3 pt-1 text-xs font-bold text-muted-foreground">페이지</p>
               <div className="min-h-0 flex-1 space-y-3 overflow-y-auto pr-1">
                 {pages.map((page) => (
-                  <button
-                    key={page.pageIndex}
-                    type="button"
-                    className={`w-full rounded-xl border p-2 text-left transition ${
-                      currentPageIndex === page.pageIndex
-                        ? 'border-primary bg-background shadow-sm'
-                        : 'border-transparent hover:border-border hover:bg-background/70'
-                    }`}
-                    onClick={() => setCurrentPageIndex(page.pageIndex)}
-                  >
-                    <div className="relative overflow-hidden rounded-md border border-border bg-white">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img className="aspect-[0.707] w-full object-contain" src={page.imageUrl} alt={`${page.pageIndex + 1}쪽 미리보기`} />
-                      {page.reviewed && (
-                        <span className="absolute right-1.5 top-1.5 grid size-5 place-items-center rounded-full bg-emerald-600 text-white shadow">
-                          <Check className="size-3" />
-                        </span>
-                      )}
-                    </div>
-                    <p className="mt-2 text-center text-xs font-semibold">{page.pageIndex + 1}쪽</p>
-                  </button>
+                  <div key={page.pageIndex} className="relative">
+                    <button
+                      type="button"
+                      className={`w-full rounded-xl border p-2 text-left transition ${
+                        currentPageIndex === page.pageIndex
+                          ? 'border-primary bg-background shadow-sm'
+                          : 'border-transparent hover:border-border hover:bg-background/70'
+                      }`}
+                      onClick={() => setCurrentPageIndex(page.pageIndex)}
+                    >
+                      <div className="overflow-hidden rounded-md border border-border bg-white">
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img className="aspect-[0.707] w-full object-contain" src={page.imageUrl} alt={`${page.pageIndex + 1}쪽 미리보기`} />
+                      </div>
+                      <p className="mt-2 text-center text-xs font-semibold">{page.pageIndex + 1}쪽</p>
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={page.reviewed}
+                      aria-label={`${page.pageIndex + 1}쪽 ${page.reviewed ? '미검토로 표시' : '검토 완료로 표시'}`}
+                      title={page.reviewed ? '검토 완료 — 다시 누르면 미검토로 바뀝니다' : '이 페이지를 검토 완료로 표시'}
+                      className={`absolute right-3 top-3 grid size-6 place-items-center rounded-full shadow-sm transition focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary ${
+                        page.reviewed
+                          ? 'border-2 border-white bg-emerald-600 text-white'
+                          : 'border-2 border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100'
+                      }`}
+                      onClick={() => setPageReviewed(page.pageIndex, !page.reviewed)}
+                    >
+                      <Check className="size-3.5" aria-hidden="true" />
+                    </button>
+                  </div>
                 ))}
               </div>
             </aside>
@@ -932,7 +970,7 @@ export default function Home() {
                     id={`review-page-${currentPage.pageIndex}`}
                     className="mt-0.5"
                     checked={currentPage.reviewed}
-                    onCheckedChange={(checked) => updateCurrentPage((page) => ({ ...page, reviewed: checked === true }))}
+                    onCheckedChange={(checked) => setPageReviewed(currentPage.pageIndex, checked === true)}
                   />
                   <span>
                     <span className="block text-sm font-bold">이 페이지를 확인했습니다</span>
@@ -951,7 +989,7 @@ export default function Home() {
             </aside>
           </div>
           {!allReviewed && (
-            <p className="mt-3 text-center text-xs text-muted-foreground">모든 페이지를 검토한 뒤 새 PDF를 저장할 수 있습니다.</p>
+            <p className="mt-3 text-center text-xs text-muted-foreground">검토하지 않은 페이지가 있으면 저장 전에 한 번 더 확인합니다.</p>
           )}
 
           <Dialog open={isSummaryOpen} onOpenChange={setIsSummaryOpen}>
@@ -1057,6 +1095,31 @@ export default function Home() {
               </DialogFooter>
             </DialogContent>
           </Dialog>
+
+          <AlertDialog open={isUnreviewedExportOpen} onOpenChange={setIsUnreviewedExportOpen}>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogMedia className="bg-amber-100 text-amber-800">
+                  <AlertCircle aria-hidden="true" />
+                </AlertDialogMedia>
+                <AlertDialogTitle>검토하지 않은 페이지가 있습니다</AlertDialogTitle>
+                <AlertDialogDescription>
+                  아직 {unreviewedCount}쪽을 직접 확인하지 않았습니다. 자동 탐지는 정보를 놓칠 수 있습니다. 현재 선택대로 PDF를 저장할까요?
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>계속 검토</AlertDialogCancel>
+                <AlertDialogAction
+                  onClick={() => {
+                    setIsUnreviewedExportOpen(false);
+                    void downloadResult();
+                  }}
+                >
+                  <Download aria-hidden="true" />검토 없이 저장
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </section>
       )}
       <Dialog

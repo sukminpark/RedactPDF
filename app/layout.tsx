@@ -17,8 +17,12 @@ export const metadata: Metadata = {
     url: __PUBLIC_CANONICAL_URL__,
   },
   icons: {
-    icon: deploymentAssetPath('favicon.svg'),
-    shortcut: deploymentAssetPath('favicon.svg'),
+    icon: [
+      { url: deploymentAssetPath("favicon.svg"), type: "image/svg+xml" },
+      { url: deploymentAssetPath("favicon-32.png"), sizes: "32x32", type: "image/png" },
+    ],
+    shortcut: [{ url: deploymentAssetPath("favicon.ico"), type: "image/x-icon" }],
+    apple: [{ url: deploymentAssetPath("apple-touch-icon.png"), sizes: "180x180", type: "image/png" }],
   },
 };
 
