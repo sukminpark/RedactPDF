@@ -283,9 +283,6 @@ describe('detectCandidates', () => {
     expect(result.find((item) => item.kind === 'government-staff')).toMatchObject({
       sourceText: '이도윤', selectionMode: 'exact-glyphs',
     });
-    expect(result.find((item) => item.kind === 'official-school-name')).toMatchObject({
-      selectionMode: 'region', y: expect.any(Number),
-    });
     expect(result.find((item) => item.kind === 'school-seal')).toMatchObject({
       selectionMode: 'region', x: 758, y: 456, width: 74, height: 74,
     });
@@ -302,6 +299,31 @@ describe('detectCandidates', () => {
       pageWidth: 1000, pageHeight: 1200, pageCount: 22,
     });
     expect(notLastPage.some((item) => item.kind === 'issuance-info')).toBe(false);
+  });
+  it('handles split Government24 labels and uses a full-height school-name region', () => {
+    const words = wordsFromLine(['정부24', '인적', '사항', '성', '명', '가나다', '담당', '자', '라바사', '발급', '번호', 'T-2048', '가림고등학교장'], 20);
+    const school = words.at(-1)!;
+    school.glyphs.forEach((glyph) => {
+      glyph.bbox = { ...glyph.bbox, y: school.bbox.y, height: 2 };
+    });
+    const result = detectCandidates(words, [], {
+      pageWidth: 1000,
+      pageHeight: 1200,
+      pageCount: 1,
+      imageBounds: [
+        { x: school.bbox.x + school.bbox.width + 10, y: 18, width: 70, height: 70 },
+        { x: 80, y: 600, width: 70, height: 70 },
+      ],
+    });
+
+    expect(result.find((item) => item.kind === 'government-name')).toMatchObject({ sourceText: '가나다' });
+    expect(result.find((item) => item.kind === 'government-staff')).toMatchObject({ sourceText: '라바사' });
+    expect(result.find((item) => item.kind === 'issuance-number')).toMatchObject({ sourceText: 'T-2048' });
+    const schoolCandidate = result.find((item) => item.kind === 'school-name');
+    expect(schoolCandidate).toMatchObject({ selectionMode: 'exact-glyphs' });
+    expect(schoolCandidate?.height).toBeGreaterThan(school.bbox.height);
+    expect(result.filter((item) => item.kind === 'school-name')).toHaveLength(1);
+    expect(result.filter((item) => item.kind === 'school-seal')).toHaveLength(1);
   });
   it('uses the embedded portrait bounds instead of a template position guess', () => {
     const imageBounds = { x: 760, y: 290, width: 145, height: 190 };

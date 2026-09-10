@@ -10,9 +10,9 @@ export type RedactionKind =
   | 'school-name'
   | 'government-name'
   | 'government-staff'
-  | 'official-school-name'
   | 'school-seal'
   | 'issuance-info'
+  | 'issuance-number'
   | 'class'
   | 'student-number'
   | 'manual';
@@ -277,6 +277,43 @@ function pushWordSliceCandidate(
   }
 }
 
+function pushWordSliceRegionCandidate(
+  candidates: RedactionCandidate[],
+  word: OcrWord,
+  slice: string,
+  kind: RedactionKind,
+  reason: string,
+  leftPadding = 6,
+  rightPadding = 6,
+  verticalPadding = 6,
+): void {
+  const source = word.text.normalize('NFKC');
+  const start = source.lastIndexOf(slice);
+  if (start < 0) return;
+  const characterWidth = word.bbox.width / Math.max(1, Array.from(source).length);
+  pushRectCandidate(
+    candidates,
+    word.pageIndex,
+    kind,
+    slice,
+    reason,
+    {
+      x: Math.max(0, word.bbox.x + characterWidth * start - leftPadding),
+      y: Math.max(0, word.bbox.y - verticalPadding),
+      width: characterWidth * Array.from(slice).length + leftPadding + rightPadding,
+      height: word.bbox.height + verticalPadding * 2,
+    },
+    word.confidence,
+  );
+  const candidate = candidates.at(-1);
+  const selectedGlyphs = word.glyphs.slice(start, start + Array.from(slice).length);
+  const selectedText = selectedGlyphs.map((glyph) => glyph.text).join('').normalize('NFKC');
+  if (candidate && selectedGlyphs.length === Array.from(slice).length && selectedText === slice.normalize('NFKC')) {
+    candidate.targetGlyphIds = selectedGlyphs.map((glyph) => glyph.id);
+    candidate.targetQuads = selectedGlyphs.map((glyph) => ({ source: glyph.source, quad: glyph.canonicalQuad, text: glyph.text }));
+    candidate.selectionMode = 'exact-glyphs';
+  }
+}
 function findResidentIds(lines: OcrWord[][], candidates: RedactionCandidate[]): void {
   for (const words of lines) {
     const hasResidentLabel = words.some((word) => /주민(?:등록)?번호/.test(normalizeCompact(word.text)));
@@ -548,21 +585,31 @@ function findGovernment24Fields(
   const pageHeight = context.pageHeight ?? Math.max(...allWords.map((word) => word.bbox.y + word.bbox.height));
 
   for (const line of lines) {
+    const lineText = line.map((word) => normalizeCompact(word.text)).join('');
     line.forEach((word, labelIndex) => {
       const label = normalizeCompact(word.text);
-      const nearbyPersonalDetails = allWords.some((candidate) =>
+      const nextLabel = normalizeCompact(line[labelIndex + 1]?.text ?? '');
+      const splitNameLabel = label === '성' && nextLabel === '명';
+      const splitStaffLabel = label === '담당' && nextLabel === '자';
+      const labelEndIndex = (splitNameLabel || splitStaffLabel) ? labelIndex + 1 : labelIndex;
+      const nearbyPersonalDetails = lineText.includes('인적사항') || allWords.some((candidate) =>
         normalizeCompact(candidate.text).includes('인적사항')
         && Math.abs(candidate.bbox.y - word.bbox.y) <= Math.max(54, word.bbox.height * 3)
         && candidate.bbox.x <= word.bbox.x + word.bbox.width,
       );
-      const kind: RedactionKind | undefined = (nearbyPersonalDetails && /^(이름|성명)$/.test(label))
+      const kind: RedactionKind | undefined = nearbyPersonalDetails && (splitNameLabel || /^(이름|성명)$/.test(label))
         ? 'government-name'
-        : /^(담당자|처리담당자|발급담당자|담당)$/.test(label)
+        : splitStaffLabel || /^(담당자|처리담당자|발급담당자|담당)$/.test(label)
           ? 'government-staff'
           : undefined;
       if (!kind) return;
-      const name = findNameBesideLabel(line, labelIndex, allWords);
-      if (name) {
+      const name = findNameBesideLabel(line, labelEndIndex, allWords);
+      const alreadyCovered = name && candidates.some((candidate) =>
+        candidate.pageIndex === name.pageIndex
+        && rectsOverlap(candidate, name.bbox)
+        && (candidate.kind === kind || candidate.kind === 'student-name' || candidate.kind === 'detected-name'),
+      );
+      if (name && !alreadyCovered) {
         pushCandidate(
           candidates,
           [name],
@@ -574,8 +621,43 @@ function findGovernment24Fields(
     });
   }
 
+  for (const line of lines) {
+    const issuanceLabelIndex = line.findIndex((word, index) => {
+      const label = normalizeCompact(word.text);
+      const nextLabel = normalizeCompact(line[index + 1]?.text ?? '');
+      return label === '발급번호' || (label === '발급' && nextLabel === '번호');
+    });
+    if (issuanceLabelIndex < 0) continue;
+    const labelEndIndex = normalizeCompact(line[issuanceLabelIndex].text) === '발급'
+      ? issuanceLabelIndex + 1
+      : issuanceLabelIndex;
+    const labelWord = line[labelEndIndex];
+    const labelCenterY = labelWord.bbox.y + labelWord.bbox.height / 2;
+    const issuanceNumber = line
+      .filter((word, index) => {
+        if (index <= labelEndIndex) return false;
+        const compact = normalizeCompact(word.text);
+        const gap = word.bbox.x - (labelWord.bbox.x + labelWord.bbox.width);
+        return /(?=.*\d)[A-Za-z0-9-]{4,}/.test(compact)
+          && gap >= -2
+          && gap <= Math.max(160, labelWord.bbox.width * 6)
+          && Math.abs(word.bbox.y + word.bbox.height / 2 - labelCenterY) <= Math.max(labelWord.bbox.height, word.bbox.height);
+      })
+      .sort((a, b) => a.bbox.x - b.bbox.x)[0];
+    if (issuanceNumber) {
+      pushRectCandidate(
+        candidates,
+        pageIndex,
+        'issuance-number',
+        normalizeCompact(issuanceNumber.text),
+        '정부24 발급번호 항목',
+        expandRect(issuanceNumber.bbox, 5, 5),
+        issuanceNumber.confidence,
+      );
+    }
+  }
+
   const schoolPrincipalWords = allWords.filter((word) => normalizeCompact(word.text).includes('학교장'));
-  const schoolWords = allWords.filter((word) => /[가-힣A-Za-z0-9·.-]{2,}(?:초등학교|중학교|고등학교)/.test(word.text.normalize('NFKC')));
   for (const principal of schoolPrincipalWords) {
     const principalCenterY = principal.bbox.y + principal.bbox.height / 2;
     const nearbySeal = (context.imageBounds ?? [])
@@ -589,26 +671,6 @@ function findGovernment24Fields(
           && image.height >= pageHeight * 0.025;
       })
       .sort((a, b) => a.x - b.x || a.y - b.y)[0];
-    const rightBoundary = nearbySeal?.x ?? principal.bbox.x + principal.bbox.width;
-    const schoolWord = schoolWords
-      .filter((word) => {
-        const centerY = word.bbox.y + word.bbox.height / 2;
-        return word.bbox.x <= rightBoundary
-          && rightBoundary - (word.bbox.x + word.bbox.width) <= pageWidth * 0.48
-          && Math.abs(centerY - principalCenterY) <= Math.max(pageHeight * 0.04, principal.bbox.height * 2.5);
-      })
-      .sort((a, b) => b.bbox.x - a.bbox.x)[0];
-    if (schoolWord) {
-      pushRectCandidate(
-        candidates,
-        pageIndex,
-        'official-school-name',
-        '학교장 명의 학교명',
-        '정부24 학교장 직인 인접 학교명',
-        expandRect(schoolWord.bbox, 8, Math.max(8, schoolWord.bbox.height * 0.4)),
-        schoolWord.confidence,
-      );
-    }
     if (nearbySeal) {
       pushRectCandidate(
         candidates,
@@ -663,7 +725,7 @@ function findSchoolRecordFields(
     const source = word.text.normalize('NFKC');
     for (const match of source.matchAll(/[가-힣A-Za-z0-9·.-]{2,}(?:초등학교|중학교|고등학교)/g)) {
       if (ignoredSchoolLabels.has(normalizeCompact(match[0])) || /학교생활/.test(match[0])) continue;
-      pushWordSliceCandidate(candidates, word, match[0], 'school-name', '학교명 또는 출신학교명', 8, 6);
+      pushWordSliceRegionCandidate(candidates, word, match[0], 'school-name', '학교명 또는 출신학교명', 8, 6, 8);
     }
   }
 

@@ -201,17 +201,21 @@ function selectedTargets(
   const textQuads: PdfQuad[] = [];
   const imageQuads: PdfQuad[] = [];
   for (const candidate of page.redactions.filter((item) => item.selected)) {
+    const targetedGlyphs = candidate.targetGlyphIds
+      .map((id) => glyphById.get(id))
+      .filter((glyph): glyph is TextGlyph => Boolean(glyph));
     if (targetMode === 'exact-glyphs' && candidate.selectionMode === 'exact-glyphs' && candidate.targetGlyphIds.length > 0) {
-      for (const id of candidate.targetGlyphIds) {
-        const glyph = glyphById.get(id);
-        if (glyph?.source === 'native') textQuads.push(canonicalToPageQuad(pdfPage, glyph.canonicalQuad));
-        if (glyph?.source === 'ocr') imageQuads.push(canonicalToPageQuad(pdfPage, glyph.canonicalQuad));
+      for (const glyph of targetedGlyphs) {
+        if (glyph.source === 'native') textQuads.push(canonicalToPageQuad(pdfPage, glyph.canonicalQuad));
+        if (glyph.source === 'ocr') imageQuads.push(canonicalToPageQuad(pdfPage, glyph.canonicalQuad));
       }
       continue;
     }
-    const matchingGlyphs = page.words
-      .flatMap((word) => word.glyphs)
-      .filter((glyph) => regionTargetsGlyph(candidate, glyph.bbox));
+    const matchingGlyphs = targetMode === 'regions' && candidate.selectionMode === 'exact-glyphs' && targetedGlyphs.length > 0
+      ? targetedGlyphs
+      : page.words
+        .flatMap((word) => word.glyphs)
+        .filter((glyph) => regionTargetsGlyph(candidate, glyph.bbox));
     for (const glyph of matchingGlyphs) {
       if (glyph.source === 'native') textQuads.push(canonicalToPageQuad(pdfPage, glyph.canonicalQuad));
     }
