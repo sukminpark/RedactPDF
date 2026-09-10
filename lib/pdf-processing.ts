@@ -449,6 +449,7 @@ export function startPdfAnalysis(
 
         pages.push({
           pageIndex: activePage,
+          pageCount: totalPages,
           pdfWidth: pdfViewport.width,
           pdfHeight: pdfViewport.height,
           renderWidth: canvas.width,
@@ -460,6 +461,7 @@ export function startPdfAnalysis(
           redactions: detectCandidates(words, enteredNames, {
             pageWidth: canvas.width,
             pageHeight: canvas.height,
+            pageCount: totalPages,
             imageBounds: nativeImageBounds,
           }),
           reviewed: false,

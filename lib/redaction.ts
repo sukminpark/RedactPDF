@@ -8,6 +8,11 @@ export type RedactionKind =
   | 'address'
   | 'photo'
   | 'school-name'
+  | 'government-name'
+  | 'government-staff'
+  | 'official-school-name'
+  | 'school-seal'
+  | 'issuance-info'
   | 'class'
   | 'student-number'
   | 'manual';
@@ -67,6 +72,7 @@ export interface RedactionCandidate extends CanvasRect {
 }
 
 export interface PageReviewState {
+  pageCount: number;
   pageIndex: number;
   pdfWidth: number;
   pdfHeight: number;
@@ -94,6 +100,7 @@ const OUTPUTTER_CATEGORY_TERMS = new Set(['교양', '국어', '수학', '영어'
 const PHOTO_IMAGE_BOTTOM_PADDING = 2;
 
 export interface DetectionContext {
+  pageCount?: number;
   pageWidth?: number;
   pageHeight?: number;
   imageBounds?: CanvasRect[];
@@ -485,6 +492,159 @@ function findDetectedNames(
   }
 }
 
+function findNameBesideLabel(
+  line: OcrWord[],
+  labelIndex: number,
+  allWords: OcrWord[],
+): OcrWord | undefined {
+  const label = line[labelIndex];
+  if (!label) return undefined;
+  const labelCenterY = label.bbox.y + label.bbox.height / 2;
+  const sameRow = line
+    .filter((word, index) => {
+      if (index <= labelIndex || !isKoreanName(word.text)) return false;
+      const centerY = word.bbox.y + word.bbox.height / 2;
+      const gap = word.bbox.x - (label.bbox.x + label.bbox.width);
+      return Math.abs(centerY - labelCenterY) <= Math.max(label.bbox.height, word.bbox.height)
+        && gap >= -2
+        && gap <= Math.max(60, label.bbox.width * 3);
+    })
+    .sort((a, b) => a.bbox.x - b.bbox.x)[0];
+  if (sameRow) return sameRow;
+
+  return allWords
+    .filter((word) => {
+      if (!isKoreanName(word.text) || word.id === label.id) return false;
+      const verticalGap = word.bbox.y - (label.bbox.y + label.bbox.height);
+      const centerOffset = Math.abs(
+        word.bbox.x + word.bbox.width / 2 - (label.bbox.x + label.bbox.width / 2),
+      );
+      return verticalGap >= -2
+        && verticalGap <= Math.max(54, label.bbox.height * 3.5)
+        && centerOffset <= Math.max(70, label.bbox.width * 2);
+    })
+    .sort((a, b) => a.bbox.y - b.bbox.y || a.bbox.x - b.bbox.x)[0];
+}
+
+function expandRect(rect: CanvasRect, horizontalPadding: number, verticalPadding: number): CanvasRect {
+  return {
+    x: Math.max(0, rect.x - horizontalPadding),
+    y: Math.max(0, rect.y - verticalPadding),
+    width: rect.width + horizontalPadding * 2,
+    height: rect.height + verticalPadding * 2,
+  };
+}
+
+function findGovernment24Fields(
+  lines: OcrWord[][],
+  allWords: OcrWord[],
+  candidates: RedactionCandidate[],
+  context: DetectionContext,
+): void {
+  if (allWords.length === 0 || !allWords.some((word) => normalizeCompact(word.text).includes('정부24'))) return;
+
+  const pageIndex = allWords[0].pageIndex;
+  const pageWidth = context.pageWidth ?? Math.max(...allWords.map((word) => word.bbox.x + word.bbox.width));
+  const pageHeight = context.pageHeight ?? Math.max(...allWords.map((word) => word.bbox.y + word.bbox.height));
+
+  for (const line of lines) {
+    line.forEach((word, labelIndex) => {
+      const label = normalizeCompact(word.text);
+      const nearbyPersonalDetails = allWords.some((candidate) =>
+        normalizeCompact(candidate.text).includes('인적사항')
+        && Math.abs(candidate.bbox.y - word.bbox.y) <= Math.max(54, word.bbox.height * 3)
+        && candidate.bbox.x <= word.bbox.x + word.bbox.width,
+      );
+      const kind: RedactionKind | undefined = (nearbyPersonalDetails && /^(이름|성명)$/.test(label))
+        ? 'government-name'
+        : /^(담당자|처리담당자|발급담당자|담당)$/.test(label)
+          ? 'government-staff'
+          : undefined;
+      if (!kind) return;
+      const name = findNameBesideLabel(line, labelIndex, allWords);
+      if (name) {
+        pushCandidate(
+          candidates,
+          [name],
+          kind,
+          normalizeCompact(name.text),
+          kind === 'government-name' ? '정부24 인적사항 이름' : '정부24 담당자 항목',
+        );
+      }
+    });
+  }
+
+  const schoolPrincipalWords = allWords.filter((word) => normalizeCompact(word.text).includes('학교장'));
+  const schoolWords = allWords.filter((word) => /[가-힣A-Za-z0-9·.-]{2,}(?:초등학교|중학교|고등학교)/.test(word.text.normalize('NFKC')));
+  for (const principal of schoolPrincipalWords) {
+    const principalCenterY = principal.bbox.y + principal.bbox.height / 2;
+    const nearbySeal = (context.imageBounds ?? [])
+      .filter((image) => {
+        const centerY = image.y + image.height / 2;
+        const horizontalGap = image.x - (principal.bbox.x + principal.bbox.width);
+        return horizontalGap >= -Math.max(24, principal.bbox.width)
+          && horizontalGap <= pageWidth * 0.24
+          && Math.abs(centerY - principalCenterY) <= Math.max(pageHeight * 0.12, principal.bbox.height * 4)
+          && image.width >= pageWidth * 0.025
+          && image.height >= pageHeight * 0.025;
+      })
+      .sort((a, b) => a.x - b.x || a.y - b.y)[0];
+    const rightBoundary = nearbySeal?.x ?? principal.bbox.x + principal.bbox.width;
+    const schoolWord = schoolWords
+      .filter((word) => {
+        const centerY = word.bbox.y + word.bbox.height / 2;
+        return word.bbox.x <= rightBoundary
+          && rightBoundary - (word.bbox.x + word.bbox.width) <= pageWidth * 0.48
+          && Math.abs(centerY - principalCenterY) <= Math.max(pageHeight * 0.04, principal.bbox.height * 2.5);
+      })
+      .sort((a, b) => b.bbox.x - a.bbox.x)[0];
+    if (schoolWord) {
+      pushRectCandidate(
+        candidates,
+        pageIndex,
+        'official-school-name',
+        '학교장 명의 학교명',
+        '정부24 학교장 직인 인접 학교명',
+        expandRect(schoolWord.bbox, 8, Math.max(8, schoolWord.bbox.height * 0.4)),
+        schoolWord.confidence,
+      );
+    }
+    if (nearbySeal) {
+      pushRectCandidate(
+        candidates,
+        pageIndex,
+        'school-seal',
+        '학교장 직인',
+        '정부24 학교장 직인 이미지',
+        expandRect(nearbySeal, 2, 2),
+        96,
+      );
+    }
+  }
+
+  if (context.pageCount !== undefined && pageIndex === context.pageCount - 1) {
+    for (const line of lines) {
+      const issuanceLabel = line.find((word) => normalizeCompact(word.text).includes('발급정보'));
+      if (!issuanceLabel) continue;
+      const sectionItems: CanvasRect[] = [
+        ...allWords.filter((word) => word.bbox.y >= issuanceLabel.bbox.y - issuanceLabel.bbox.height * 0.5).map((word) => word.bbox),
+        ...(context.imageBounds ?? []).filter((image) => image.y + image.height >= issuanceLabel.bbox.y).map((image) => image),
+      ];
+      if (sectionItems.length > 0) {
+        pushRectCandidate(
+          candidates,
+          pageIndex,
+          'issuance-info',
+          '발급정보',
+          '정부24 마지막 쪽 발급정보 전체',
+          unionRects(sectionItems, 8),
+          98,
+        );
+      }
+      break;
+    }
+  }
+}
 function findSchoolRecordFields(
   lines: OcrWord[][],
   allWords: OcrWord[],
@@ -858,6 +1018,7 @@ export function detectCandidates(
   findEnteredNames(lines, enteredNames, candidates);
   findDetectedNames(lines, words, candidates);
   findSchoolRecordFields(lines, words, candidates, context);
+  findGovernment24Fields(lines, words, candidates, context);
   findCorrectionLedgerFields(words, candidates);
   return candidates;
 }

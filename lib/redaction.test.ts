@@ -242,6 +242,67 @@ describe('detectCandidates', () => {
     expect(inlineResult.some((item) => item.kind === 'student-number' && item.sourceText === '9')).toBe(true);
   });
 
+  it('finds Government24 personal names, school seal details, and final issuance information', () => {
+    const place = (word: OcrWord, x: number, y: number, lineId: string) => {
+      const deltaX = x - word.bbox.x;
+      const deltaY = y - word.bbox.y;
+      word.id = `${word.id}-${lineId}`;
+      word.lineId = lineId;
+      word.bbox = { ...word.bbox, x, y };
+      word.glyphs.forEach((glyph) => {
+        glyph.bbox = { ...glyph.bbox, x: glyph.bbox.x + deltaX, y: glyph.bbox.y + deltaY };
+      });
+    };
+    const government = wordsFromLine(['정부24'], 20);
+    const personal = wordsFromLine(['인적사항', '이름', '김하늘'], 20);
+    const staff = wordsFromLine(['담당자', '이도윤'], 20);
+    const school = wordsFromLine(['가림고등학교장'], 20);
+    const issuance = wordsFromLine(['발급정보', '문서확인'], 20);
+    place(government[0], 40, 30, 'government');
+    place(personal[0], 80, 120, 'personal');
+    place(personal[1], 220, 120, 'personal');
+    place(personal[2], 310, 120, 'personal');
+    place(staff[0], 80, 180, 'staff');
+    place(staff[1], 180, 180, 'staff');
+    place(school[0], 600, 480, 'school');
+    place(issuance[0], 80, 860, 'issuance');
+    place(issuance[1], 120, 910, 'issuance-detail');
+    const result = detectCandidates([...government, ...personal, ...staff, ...school, ...issuance], [], {
+      pageWidth: 1000,
+      pageHeight: 1200,
+      pageCount: 21,
+      imageBounds: [
+        { x: 760, y: 458, width: 70, height: 70 },
+        { x: 680, y: 900, width: 70, height: 70 },
+      ],
+    });
+
+    expect(result.find((item) => item.kind === 'government-name')).toMatchObject({
+      sourceText: '김하늘', selectionMode: 'exact-glyphs',
+    });
+    expect(result.find((item) => item.kind === 'government-staff')).toMatchObject({
+      sourceText: '이도윤', selectionMode: 'exact-glyphs',
+    });
+    expect(result.find((item) => item.kind === 'official-school-name')).toMatchObject({
+      selectionMode: 'region', y: expect.any(Number),
+    });
+    expect(result.find((item) => item.kind === 'school-seal')).toMatchObject({
+      selectionMode: 'region', x: 758, y: 456, width: 74, height: 74,
+    });
+    expect(result.find((item) => item.kind === 'issuance-info')).toMatchObject({
+      selectionMode: 'region', y: expect.any(Number),
+    });
+
+    const nonGovernment = detectCandidates(wordsFromLine(['인적사항', '이름', '김하늘']), [], {
+      pageWidth: 1000, pageHeight: 1200, pageCount: 1,
+    });
+    expect(nonGovernment.some((item) => item.kind === 'government-name')).toBe(false);
+
+    const notLastPage = detectCandidates([...government, ...issuance], [], {
+      pageWidth: 1000, pageHeight: 1200, pageCount: 22,
+    });
+    expect(notLastPage.some((item) => item.kind === 'issuance-info')).toBe(false);
+  });
   it('uses the embedded portrait bounds instead of a template position guess', () => {
     const imageBounds = { x: 760, y: 290, width: 145, height: 190 };
     const result = detectCandidates(wordsFromLine(['학교생활기록부']), [], {
