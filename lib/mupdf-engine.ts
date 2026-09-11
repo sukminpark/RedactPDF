@@ -17,6 +17,16 @@ const METADATA_KEYS = [
   mupdf.Document.META_INFO_MODIFICATIONDATE,
 ];
 
+mupdf.setLog({
+  error(message) {
+    console.error(`MuPDF: ${message}`);
+  },
+  warning(message) {
+    if (/cannot encode character/i.test(message)) return;
+    console.warn(`MuPDF: ${message}`);
+  },
+});
+
 function quadRect(quad: PdfQuad): Rect {
   const xs = [quad[0], quad[2], quad[4], quad[6]];
   const ys = [quad[1], quad[3], quad[5], quad[7]];

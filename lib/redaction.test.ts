@@ -113,6 +113,47 @@ describe('detectCandidates', () => {
     expect(result.some((item) => item.kind === 'detected-name' || item.kind === 'student-name')).toBe(false);
   });
 
+  it('does not treat a predicate after narrative "name" as a personal name', () => {
+    const result = detectCandidates(wordsFromLine(['세포', '이름', '붙여졌다', '설명했다']), []);
+    expect(result.some((item) => item.kind === 'detected-name' || item.kind === 'student-name')).toBe(false);
+  });
+
+  it('keeps an explicitly punctuated name field', () => {
+    const result = detectCandidates(wordsFromLine(['이름:', '김하늘']), []);
+    expect(result.some((item) => item.kind === 'detected-name' && item.sourceText === '김하늘')).toBe(true);
+  });
+
+  it('does not treat an adverb after narrative "name" as a personal name', () => {
+    const result = detectCandidates(wordsFromLine(['세포', '이름', '쉽게', '설명했다']), []);
+    expect(result.some((item) => item.kind === 'detected-name' || item.kind === 'student-name')).toBe(false);
+  });
+
+  it('finds a student name in a numbered school-record table row', () => {
+    const result = detectCandidates(
+      wordsFromLine(['학교생활기록부', '번호', '2', '이름', '가나다', '학업성적']),
+      [],
+    );
+    expect(result.some((item) => item.kind === 'student-name' && item.sourceText === '가나다')).toBe(true);
+  });
+
+  it('finds a numbered name table on a title-free middle school-record page', () => {
+    const result = detectCandidates(
+      wordsFromLine(['번호', '2', '이름', '가나다', '학업성적']),
+      [],
+      { isSchoolRecordDocument: true },
+    );
+    expect(result.some((item) => item.kind === 'student-name' && item.sourceText === '가나다')).toBe(true);
+  });
+
+  it('does not use a numbered narrative row as a name table', () => {
+    const result = detectCandidates(
+      wordsFromLine(['번호', '2', '이름', '쉽게']),
+      [],
+      { isSchoolRecordDocument: true },
+    );
+    expect(result.some((item) => item.kind === 'student-name' || item.kind === 'detected-name')).toBe(false);
+  });
+
   it('does not treat an unpaired activity label "반" as a student class field', () => {
     const result = detectCandidates(wordsFromLine(['자율활동', '시수', '반', '12']), []);
     expect(result.some((item) => item.kind === 'class')).toBe(false);
@@ -163,6 +204,58 @@ describe('detectCandidates', () => {
     expect(result.some((item) => item.kind === 'class' && item.sourceText === '2')).toBe(true);
     expect(result.some((item) => item.kind === 'student-number' && item.sourceText === '3')).toBe(true);
     expect(result.some((item) => item.sourceText === '17')).toBe(false);
+  });
+
+  it('finds class and number values for every grade row in a school record table', () => {
+    const headers = wordsFromLine(['학년', '학과', '반', '번호', '담임성명']);
+    const gradeRows = wordsFromLine(['1', '2', '3']);
+    const classRows = wordsFromLine(['8', '9', '10']);
+    const numberRows = wordsFromLine(['1', '16', '12']);
+    headers.forEach((word, index) => { word.bbox.x = 40 + index * 100; });
+    [55, 85, 115].forEach((y, index) => {
+      gradeRows[index].bbox = { ...gradeRows[index].bbox, x: 40, y };
+      classRows[index].bbox = { ...classRows[index].bbox, x: 240, y };
+      numberRows[index].bbox = { ...numberRows[index].bbox, x: 340, y };
+      gradeRows[index].lineId = `grade-${index}`;
+      classRows[index].lineId = `class-${index}`;
+      numberRows[index].lineId = `number-${index}`;
+    });
+    const result = detectCandidates([...headers, ...gradeRows, ...classRows, ...numberRows], [], {
+      pageWidth: 900,
+      pageHeight: 1200,
+    });
+    expect(result.filter((item) => item.kind === 'class').map((item) => item.sourceText)).toEqual(['8', '9', '10']);
+    expect(result.filter((item) => item.kind === 'student-number').map((item) => item.sourceText)).toEqual(['1', '16', '12']);
+  });
+
+  it('finds every grade row when school record headers are split across OCR lines', () => {
+    const headers = wordsFromLine(['학년', '학과', '반', '번호', '담임성명']);
+    const gradeRows = wordsFromLine(['1', '2', '3']);
+    const classRows = wordsFromLine(['8', '9', '10']);
+    const numberRows = wordsFromLine(['1', '16', '12']);
+    headers.forEach((word, index) => {
+      word.bbox.x = 40 + index * 100;
+      word.lineId = `header-${index}`;
+    });
+    [55, 85, 115].forEach((y, index) => {
+      gradeRows[index].bbox = { ...gradeRows[index].bbox, x: 40, y };
+      classRows[index].bbox = { ...classRows[index].bbox, x: 240, y };
+      numberRows[index].bbox = { ...numberRows[index].bbox, x: 340, y };
+      gradeRows[index].lineId = `grade-${index}`;
+      classRows[index].lineId = `class-${index}`;
+      numberRows[index].lineId = `number-${index}`;
+    });
+    const result = detectCandidates([...headers, ...gradeRows, ...classRows, ...numberRows], [], {
+      pageWidth: 900,
+      pageHeight: 1200,
+    });
+    expect(result.filter((item) => item.kind === 'class').map((item) => item.sourceText)).toEqual(['8', '9', '10']);
+    expect(result.filter((item) => item.kind === 'student-number').map((item) => item.sourceText)).toEqual(['1', '16', '12']);
+  });
+
+  it('does not treat a symphony movement number as a student number', () => {
+    const result = detectCandidates(wordsFromLine(['교향곡 2번']), []);
+    expect(result.some((item) => item.kind === 'student-number')).toBe(false);
   });
 
   it('excludes activity rows and requires identity context for inline class text', () => {
@@ -301,7 +394,10 @@ describe('detectCandidates', () => {
     expect(notLastPage.some((item) => item.kind === 'issuance-info')).toBe(false);
   });
   it('handles split Government24 labels and uses a full-height school-name region', () => {
-    const words = wordsFromLine(['정부24', '인적', '사항', '성', '명', '가나다', '담당', '자', '라바사', '발급', '번호', 'T-2048', '가림고등학교장'], 20);
+    const words = wordsFromLine(['학교생활기록부', '인적', '사항', '성', '명', '가나다', '담당', '자', '라바사', '발급', '번호', 'T-2048', '가림고등학교장'], 20);
+    [1, 2, 3, 4, 5, 6, 7, 8].forEach((index) => {
+      words[index].lineId = `split-${index}`;
+    });
     const school = words.at(-1)!;
     school.glyphs.forEach((glyph) => {
       glyph.bbox = { ...glyph.bbox, y: school.bbox.y, height: 2 };
@@ -325,6 +421,34 @@ describe('detectCandidates', () => {
     expect(result.filter((item) => item.kind === 'school-name')).toHaveLength(1);
     expect(result.filter((item) => item.kind === 'school-seal')).toHaveLength(1);
   });
+  it('finds a Government24 staff name split into table-cell glyphs', () => {
+    const words = wordsFromLine(['\uD559\uAD50\uC0DD\uD65C\uAE30\uB85D\uBD80', '\uBC1C\uAE09\uBC88\uD638', 'T-2048', '\uB2F4', '\uB2F9', '\uC790', '\uB77C', '\uBC14', '\uC0AC'], 20);
+    [3, 4, 5, 6, 7, 8].forEach((index) => {
+      words[index].lineId = `table-cell-${index}`;
+    });
+    const result = detectCandidates(words, [], {
+      pageWidth: 1000,
+      pageHeight: 1200,
+      pageCount: 1,
+    });
+    expect(result.find((item) => item.kind === 'government-staff')).toMatchObject({
+      sourceText: '\uB77C\uBC14\uC0AC',
+      selectionMode: 'exact-glyphs',
+    });
+  });
+
+  it('draws a school-name candidate from selected glyph bounds', () => {
+    const [word] = wordsFromLine(['새봄고등학교장']);
+    word.bbox = { x: 500, y: 20, width: 120, height: 18 };
+    word.glyphs.forEach((glyph, index) => {
+      glyph.bbox = { x: 120 + index * 12, y: 20, width: 12, height: 18 };
+    });
+    const candidate = detectCandidates([word], []).find((item) => item.kind === 'school-name');
+    expect(candidate).toMatchObject({ sourceText: '새봄고등학교', selectionMode: 'exact-glyphs' });
+    expect(candidate?.x).toBeLessThan(120);
+    expect(candidate?.x).toBeGreaterThan(100);
+  });
+
   it('uses the embedded portrait bounds instead of a template position guess', () => {
     const imageBounds = { x: 760, y: 290, width: 145, height: 190 };
     const result = detectCandidates(wordsFromLine(['학교생활기록부']), [], {

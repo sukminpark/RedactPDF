@@ -104,6 +104,7 @@ export interface DetectionContext {
   pageWidth?: number;
   pageHeight?: number;
   imageBounds?: CanvasRect[];
+  isSchoolRecordDocument?: boolean;
 }
 
 export function unionRects(rects: CanvasRect[], padding = 0): CanvasRect {
@@ -291,24 +292,27 @@ function pushWordSliceRegionCandidate(
   const start = source.lastIndexOf(slice);
   if (start < 0) return;
   const characterWidth = word.bbox.width / Math.max(1, Array.from(source).length);
-  pushRectCandidate(
-    candidates,
-    word.pageIndex,
-    kind,
-    slice,
-    reason,
-    {
-      x: Math.max(0, word.bbox.x + characterWidth * start - leftPadding),
-      y: Math.max(0, word.bbox.y - verticalPadding),
-      width: characterWidth * Array.from(slice).length + leftPadding + rightPadding,
-      height: word.bbox.height + verticalPadding * 2,
-    },
-    word.confidence,
-  );
-  const candidate = candidates.at(-1);
   const selectedGlyphs = word.glyphs.slice(start, start + Array.from(slice).length);
   const selectedText = selectedGlyphs.map((glyph) => glyph.text).join('').normalize('NFKC');
-  if (candidate && selectedGlyphs.length === Array.from(slice).length && selectedText === slice.normalize('NFKC')) {
+  const hasExactGlyphs = selectedGlyphs.length === Array.from(slice).length
+    && selectedText === slice.normalize('NFKC');
+  const glyphBounds = hasExactGlyphs ? unionRects(selectedGlyphs.map((glyph) => glyph.bbox)) : undefined;
+  const rect = glyphBounds
+    ? {
+        x: Math.max(0, glyphBounds.x - leftPadding),
+        y: Math.max(0, glyphBounds.y - verticalPadding),
+        width: glyphBounds.width + leftPadding + rightPadding,
+        height: glyphBounds.height + verticalPadding * 2,
+      }
+    : {
+        x: Math.max(0, word.bbox.x + characterWidth * start - leftPadding),
+        y: Math.max(0, word.bbox.y - verticalPadding),
+        width: characterWidth * Array.from(slice).length + leftPadding + rightPadding,
+        height: word.bbox.height + verticalPadding * 2,
+      };
+  pushRectCandidate(candidates, word.pageIndex, kind, slice, reason, rect, word.confidence);
+  const candidate = candidates.at(-1);
+  if (candidate && hasExactGlyphs) {
     candidate.targetGlyphIds = selectedGlyphs.map((glyph) => glyph.id);
     candidate.targetQuads = selectedGlyphs.map((glyph) => ({ source: glyph.source, quad: glyph.canonicalQuad, text: glyph.text }));
     candidate.selectionMode = 'exact-glyphs';
@@ -435,6 +439,14 @@ function isKoreanName(value: string): boolean {
   return /^[가-힣]{2,5}$/.test(normalizeCompact(value));
 }
 
+function isPlausibleNameFieldValue(value: string, label: string): boolean {
+  if (!isKoreanName(value)) return false;
+  if (label !== '이름') return true;
+  // A bare “이름” in narrative prose can be followed by a Korean predicate.
+  // Keep form-style name fields, but never treat a predicate as a person's name.
+  return !/(?:다고|했다|된다|였다|었다|졌다|이다|하며|하고|하는|하여|해서|게)$/.test(normalizeCompact(value));
+}
+
 function isLikelyFooterOutputter(value: string): boolean {
   const compact = normalizeCompact(value);
   return isKoreanName(compact) && !OUTPUTTER_CATEGORY_TERMS.has(compact);
@@ -444,7 +456,13 @@ function nameFieldLabel(word: OcrWord): string | undefined {
   const raw = word.text.normalize('NFKC').trim();
   const compact = normalizeCompact(raw);
   for (const label of LABELS) {
-    if (compact === label) return label;
+    // Plain “이름” is common in narrative school-record text. It is a field
+    // label only when it has explicit field punctuation; Government24 tables
+    // are handled separately with their own document-context rule.
+    if (compact === label) {
+      if (label !== '이름' || /[:：]/.test(raw)) return label;
+      continue;
+    }
     if (!raw.startsWith(label)) continue;
     const suffix = raw.slice(label.length);
     if (/^[\s:：]/.test(suffix)) return label;
@@ -474,14 +492,14 @@ function findDetectedNames(
 
       const inlineValue = normalized.slice(label.length);
       const kind: RedactionKind = label === '성명' ? 'student-name' : 'detected-name';
-      if (isKoreanName(inlineValue)) {
+      if (isPlausibleNameFieldValue(inlineValue, label)) {
         pushWordSliceCandidate(candidates, word, inlineValue, kind, `${label} 항목 주변`);
         return;
       }
 
       const labelRight = word.bbox.x + word.bbox.width;
       const sameLine = words.slice(index + 1).find((candidate) => {
-        if (!isKoreanName(candidate.text)) return false;
+        if (!isPlausibleNameFieldValue(candidate.text, label)) return false;
         const candidateCenterY = candidate.bbox.y + candidate.bbox.height / 2;
         const horizontalGap = candidate.bbox.x - labelRight;
         const sameRow = Math.abs(candidateCenterY - (word.bbox.y + word.bbox.height / 2)) <= word.bbox.height;
@@ -502,7 +520,7 @@ function findDetectedNames(
 
       const anchorCenterY = word.bbox.y + word.bbox.height / 2;
       const nearby = orderedWords.find((candidate) => {
-        if (!isKoreanName(candidate.text) || candidate.id === word.id) return false;
+        if (!isPlausibleNameFieldValue(candidate.text, label) || candidate.id === word.id) return false;
         const candidateCenterY = candidate.bbox.y + candidate.bbox.height / 2;
         const onSameRow = Math.abs(candidateCenterY - anchorCenterY) <= word.bbox.height * 1.5;
         const horizontalGap = candidate.bbox.x - (word.bbox.x + word.bbox.width);
@@ -549,6 +567,18 @@ function findNameBesideLabel(
     .sort((a, b) => a.bbox.x - b.bbox.x)[0];
   if (sameRow) return sameRow;
 
+  const sameRowAcrossLines = allWords
+    .filter((word) => {
+      if (!isKoreanName(word.text) || word.id === label.id) return false;
+      const centerY = word.bbox.y + word.bbox.height / 2;
+      const gap = word.bbox.x - (label.bbox.x + label.bbox.width);
+      return Math.abs(centerY - labelCenterY) <= Math.max(label.bbox.height, word.bbox.height) * 1.5
+        && gap >= -2
+        && gap <= Math.max(140, label.bbox.width * 6);
+    })
+    .sort((a, b) => a.bbox.x - b.bbox.x)[0];
+  if (sameRowAcrossLines) return sameRowAcrossLines;
+
   return allWords
     .filter((word) => {
       if (!isKoreanName(word.text) || word.id === label.id) return false;
@@ -561,6 +591,51 @@ function findNameBesideLabel(
         && centerOffset <= Math.max(70, label.bbox.width * 2);
     })
     .sort((a, b) => a.bbox.y - b.bbox.y || a.bbox.x - b.bbox.x)[0];
+}
+
+function findNamePartsBesideLabel(
+  line: OcrWord[],
+  labelIndex: number,
+  allWords: OcrWord[],
+): OcrWord[] | undefined {
+  const wholeName = findNameBesideLabel(line, labelIndex, allWords);
+  if (wholeName) return [wholeName];
+
+  const label = line[labelIndex];
+  if (!label) return undefined;
+  const labelCenterY = label.bbox.y + label.bbox.height / 2;
+  const nameParts = allWords
+    .filter((word) => {
+      if (!/^[가-힣]$/.test(normalizeCompact(word.text)) || word.id === label.id) return false;
+      const centerY = word.bbox.y + word.bbox.height / 2;
+      const gap = word.bbox.x - (label.bbox.x + label.bbox.width);
+      return Math.abs(centerY - labelCenterY) <= Math.max(label.bbox.height, word.bbox.height) * 1.5
+        && gap >= -2
+        && gap <= Math.max(140, label.bbox.width * 6);
+    })
+    .sort((a, b) => a.bbox.x - b.bbox.x);
+
+  for (let start = 0; start < nameParts.length; start += 1) {
+    const parts = [nameParts[start]];
+    let compactName = normalizeCompact(nameParts[start].text);
+    for (let index = start + 1; index < nameParts.length && compactName.length < 5; index += 1) {
+      const previous = parts.at(-1)!;
+      const next = nameParts[index];
+      const gap = next.bbox.x - (previous.bbox.x + previous.bbox.width);
+      if (gap > Math.max(28, previous.bbox.width * 1.5)) break;
+      parts.push(next);
+      compactName += normalizeCompact(next.text);
+      if (isKoreanName(compactName)) {
+        const following = nameParts[index + 1];
+        const followingGap = following ? following.bbox.x - (next.bbox.x + next.bbox.width) : Number.POSITIVE_INFINITY;
+        if (compactName.length === 2
+          && following
+          && /^[\uAC00-\uD7A3]$/.test(normalizeCompact(following.text))
+          && followingGap <= Math.max(28, next.bbox.width * 1.5)) continue;
+        return parts;
+      }
+    }
+  }
 }
 
 function expandRect(rect: CanvasRect, horizontalPadding: number, verticalPadding: number): CanvasRect {
@@ -578,7 +653,11 @@ function findGovernment24Fields(
   candidates: RedactionCandidate[],
   context: DetectionContext,
 ): void {
-  if (allWords.length === 0 || !allWords.some((word) => normalizeCompact(word.text).includes('정부24'))) return;
+  if (allWords.length === 0) return;
+  const documentText = allWords.map((word) => normalizeCompact(word.text)).join('');
+  const isGovernment24Document = documentText.includes('정부24')
+    || (documentText.includes('학교생활기록부') && documentText.includes('발급번호'));
+  if (!isGovernment24Document) return;
 
   const pageIndex = allWords[0].pageIndex;
   const pageWidth = context.pageWidth ?? Math.max(...allWords.map((word) => word.bbox.x + word.bbox.width));
@@ -589,11 +668,23 @@ function findGovernment24Fields(
     line.forEach((word, labelIndex) => {
       const label = normalizeCompact(word.text);
       const nextLabel = normalizeCompact(line[labelIndex + 1]?.text ?? '');
-      const splitNameLabel = label === '성' && nextLabel === '명';
-      const splitStaffLabel = label === '담당' && nextLabel === '자';
-      const labelEndIndex = (splitNameLabel || splitStaffLabel) ? labelIndex + 1 : labelIndex;
+      const hasLeftLabelPart = (part: string) => allWords
+        .filter((candidate) =>
+          candidate.bbox.x + candidate.bbox.width <= word.bbox.x + 2
+          && word.bbox.x - (candidate.bbox.x + candidate.bbox.width) <= Math.max(72, word.bbox.width * 4)
+          && Math.abs(candidate.bbox.y + candidate.bbox.height / 2 - (word.bbox.y + word.bbox.height / 2)) <= Math.max(candidate.bbox.height, word.bbox.height) * 1.5,
+        )
+        .sort((a, b) => a.bbox.x - b.bbox.x)
+        .slice(-3)
+        .map((candidate) => normalizeCompact(candidate.text))
+        .join('')
+        .endsWith(part);
+      const hasFollowingLabelPart = (label === '성' && nextLabel === '명') || (label === '담당' && nextLabel === '자');
+      const splitNameLabel = (label === '성' && nextLabel === '명') || (label === '명' && hasLeftLabelPart('성'));
+      const splitStaffLabel = (label === '담당' && nextLabel === '자') || (label === '자' && hasLeftLabelPart('담당'));
+      const labelEndIndex = hasFollowingLabelPart ? labelIndex + 1 : labelIndex;
       const nearbyPersonalDetails = lineText.includes('인적사항') || allWords.some((candidate) =>
-        normalizeCompact(candidate.text).includes('인적사항')
+        (normalizeCompact(candidate.text).includes('인적사항') || /^(인적|사항)$/.test(normalizeCompact(candidate.text)))
         && Math.abs(candidate.bbox.y - word.bbox.y) <= Math.max(54, word.bbox.height * 3)
         && candidate.bbox.x <= word.bbox.x + word.bbox.width,
       );
@@ -603,18 +694,19 @@ function findGovernment24Fields(
           ? 'government-staff'
           : undefined;
       if (!kind) return;
-      const name = findNameBesideLabel(line, labelEndIndex, allWords);
-      const alreadyCovered = name && candidates.some((candidate) =>
-        candidate.pageIndex === name.pageIndex
-        && rectsOverlap(candidate, name.bbox)
+      const nameParts = findNamePartsBesideLabel(line, labelEndIndex, allWords);
+      const nameBounds = nameParts ? unionRects(nameParts.map((name) => name.bbox)) : undefined;
+      const alreadyCovered = nameParts && nameBounds && candidates.some((candidate) =>
+        candidate.pageIndex === nameParts[0].pageIndex
+        && rectsOverlap(candidate, nameBounds)
         && (candidate.kind === kind || candidate.kind === 'student-name' || candidate.kind === 'detected-name'),
       );
-      if (name && !alreadyCovered) {
+      if (nameParts && !alreadyCovered) {
         pushCandidate(
           candidates,
-          [name],
+          nameParts,
           kind,
-          normalizeCompact(name.text),
+          nameParts.map((name) => normalizeCompact(name.text)).join(''),
           kind === 'government-name' ? '정부24 인적사항 이름' : '정부24 담당자 항목',
         );
       }
@@ -718,14 +810,51 @@ function findSchoolRecordFields(
   const pageWidth = context.pageWidth ?? Math.max(...allWords.map((word) => word.bbox.x + word.bbox.width));
   const pageHeight = context.pageHeight ?? Math.max(...allWords.map((word) => word.bbox.y + word.bbox.height));
   const documentText = allWords.map((word) => normalizeCompact(word.text)).join('');
-  const isSchoolRecord = /학교생활(?:세부사항)?기록부|대입전형자료/.test(documentText);
+  const isSchoolRecord = context.isSchoolRecordDocument
+    ?? /학교생활(?:세부사항)?기록부|대입전형자료/.test(documentText);
 
   const ignoredSchoolLabels = new Set(['출신중학교', '출신고등학교', '전입학교', '졸업학교']);
   for (const word of allWords) {
     const source = word.text.normalize('NFKC');
     for (const match of source.matchAll(/[가-힣A-Za-z0-9·.-]{2,}(?:초등학교|중학교|고등학교)/g)) {
       if (ignoredSchoolLabels.has(normalizeCompact(match[0])) || /학교생활/.test(match[0])) continue;
-      pushWordSliceRegionCandidate(candidates, word, match[0], 'school-name', '학교명 또는 출신학교명', 8, 6, 8);
+      const isSchoolPrincipalName = normalizeCompact(word.text).includes('학교장');
+      const verticalPadding = isSchoolPrincipalName
+        ? Math.max(15, (32 - word.bbox.height) / 2)
+        : 8;
+      pushWordSliceRegionCandidate(candidates, word, match[0], 'school-name', '학교명 또는 출신학교명', 8, 6, verticalPadding);
+    }
+  }
+
+  // A numbered school-record table can express the name field without a
+  // colon (for example: 번호 | 2 | 이름 | 홍길동). Keep this distinct from
+  // narrative “이름” by requiring the preceding number header and its value
+  // on the same visual row.
+  if (isSchoolRecord) {
+    for (const nameHeader of allWords.filter((word) => normalizeCompact(word.text) === '이름')) {
+      const centerY = nameHeader.bbox.y + nameHeader.bbox.height / 2;
+      const row = allWords
+        .filter((word) =>
+          Math.abs(word.bbox.y + word.bbox.height / 2 - centerY) <= Math.max(nameHeader.bbox.height, word.bbox.height) * 1.4,
+        )
+        .sort((left, right) => left.bbox.x - right.bbox.x);
+      const nameIndex = row.indexOf(nameHeader);
+      const numberIndex = row.findIndex((word, index) => index < nameIndex && normalizeCompact(word.text) === '번호');
+      const hasNumberValue = numberIndex >= 0 && row
+        .slice(numberIndex + 1, nameIndex)
+        .some((word) => /^\d{1,3}$/.test(normalizeCompact(word.text)));
+      if (!hasNumberValue) continue;
+      const name = row
+        .slice(nameIndex + 1)
+        .find((word) => {
+          const gap = word.bbox.x - (nameHeader.bbox.x + nameHeader.bbox.width);
+          return isPlausibleNameFieldValue(word.text, '이름')
+            && gap >= -2
+            && gap <= Math.max(140, nameHeader.bbox.width * 6);
+        });
+      if (name) {
+        pushCandidate(candidates, [name], 'student-name', normalizeCompact(name.text), '번호·이름 표 항목');
+      }
     }
   }
 
@@ -762,16 +891,20 @@ function findSchoolRecordFields(
     for (const header of allWords.filter((word) => definition.labels.test(normalizeCompact(word.text)))) {
       const row = lines.find((line) => line.includes(header)) ?? [];
       const rowText = row.map((word) => normalizeCompact(word.text)).join(' ');
-      if (activityContext.test(rowText)) continue;
-      const hasClassLabel = row.some((word) => /^(학급|반)$/.test(normalizeCompact(word.text)));
-      const hasNumberLabel = row.some((word) => /^번호$/.test(normalizeCompact(word.text)));
-      const headerCount = identityHeaders.filter((label) => row.some((word) => normalizeCompact(word.text).includes(label))).length;
-      const isTableHeader = headerCount >= 3;
+      const headerCenterY = header.bbox.y + header.bbox.height / 2;
+      const headerBand = allWords.filter((word) =>
+        Math.abs(word.bbox.y + word.bbox.height / 2 - headerCenterY) <= Math.max(header.bbox.height, word.bbox.height) * 1.6,
+      );
+      const tableHeaders = headerBand.filter((word) => identityHeaders.includes(normalizeCompact(word.text)));
+      const headerText = tableHeaders.map((word) => normalizeCompact(word.text)).join(' ');
+      if (activityContext.test(rowText) || activityContext.test(headerText)) continue;
+      const hasClassLabel = tableHeaders.some((word) => /^(학급|반)$/.test(normalizeCompact(word.text)));
+      const hasNumberLabel = tableHeaders.some((word) => /^번호$/.test(normalizeCompact(word.text)));
+      const isTableHeader = tableHeaders.length >= 3;
       if (definition.kind === 'class' && normalizeCompact(header.text) === '반' && !hasNumberLabel) continue;
 
       // Footer and identity rows are horizontal. Once paired labels exist on
       // the row, use only the immediately adjacent value and never scan down.
-      const headerCenterY = header.bbox.y + header.bbox.height / 2;
       const horizontalValue = row
         .filter((word) => {
           const value = normalizeCompact(word.text);
@@ -797,22 +930,54 @@ function findSchoolRecordFields(
       // Vertical lookup is reserved for a real student table header. Derive
       // cell boundaries from adjacent headers and select only its first row.
       if (!isTableHeader) continue;
-      const orderedHeaders = [...row].sort((a, b) => a.bbox.x - b.bbox.x);
+      const orderedHeaders = [...tableHeaders].sort((a, b) => a.bbox.x - b.bbox.x);
       const headerIndex = orderedHeaders.indexOf(header);
       const previous = orderedHeaders[headerIndex - 1];
       const next = orderedHeaders[headerIndex + 1];
       const left = previous ? (previous.bbox.x + previous.bbox.width + header.bbox.x) / 2 : Math.max(0, header.bbox.x - pageWidth * 0.06);
       const right = next ? (header.bbox.x + header.bbox.width + next.bbox.x) / 2 : Math.min(pageWidth, header.bbox.x + header.bbox.width + pageWidth * 0.06);
-      const verticalValue = allWords
+      const gradeHeader = orderedHeaders.find((item) => normalizeCompact(item.text) === '학년');
+      const gradeHeaderIndex = gradeHeader ? orderedHeaders.indexOf(gradeHeader) : -1;
+      const gradePrevious = gradeHeaderIndex > 0 ? orderedHeaders[gradeHeaderIndex - 1] : undefined;
+      const gradeNext = gradeHeaderIndex >= 0 ? orderedHeaders[gradeHeaderIndex + 1] : undefined;
+      const gradeLeft = gradeHeader
+        ? (gradePrevious ? (gradePrevious.bbox.x + gradePrevious.bbox.width + gradeHeader.bbox.x) / 2 : Math.max(0, gradeHeader.bbox.x - pageWidth * 0.06))
+        : 0;
+      const gradeRight = gradeHeader
+        ? (gradeNext ? (gradeHeader.bbox.x + gradeHeader.bbox.width + gradeNext.bbox.x) / 2 : Math.min(pageWidth, gradeHeader.bbox.x + gradeHeader.bbox.width + pageWidth * 0.06))
+        : 0;
+      const gradeRowCenters = gradeHeader
+        ? allWords
+          .filter((word) => {
+            const value = normalizeCompact(word.text);
+            const centerX = word.bbox.x + word.bbox.width / 2;
+            return /^[1-3]$/.test(value)
+              && word.bbox.y > gradeHeader.bbox.y + gradeHeader.bbox.height * 0.5
+              && word.bbox.y - gradeHeader.bbox.y < pageHeight * 0.16
+              && centerX >= gradeLeft
+              && centerX <= gradeRight;
+          })
+          .sort((a, b) => a.bbox.y - b.bbox.y)
+          .slice(0, 3)
+          .map((word) => word.bbox.y + word.bbox.height / 2)
+        : [];
+
+      const verticalValues = allWords
         .filter((word) => {
           if (!/^\d{1,3}$/.test(normalizeCompact(word.text))) return false;
           const candidateCenterX = word.bbox.x + word.bbox.width / 2;
+          const candidateCenterY = word.bbox.y + word.bbox.height / 2;
           const below = word.bbox.y > header.bbox.y + header.bbox.height * 0.5;
-          const withinFirstRow = word.bbox.y - header.bbox.y < pageHeight * 0.06;
-          return below && withinFirstRow && candidateCenterX >= left && candidateCenterX <= right;
+          const onGradeRow = gradeRowCenters.length > 0
+            ? gradeRowCenters.some((rowCenter) => Math.abs(candidateCenterY - rowCenter) <= Math.max(header.bbox.height, word.bbox.height) * 1.4)
+            : word.bbox.y - header.bbox.y < pageHeight * 0.06;
+          return below && onGradeRow && candidateCenterX >= left && candidateCenterX <= right;
         })
-        .sort((a, b) => a.bbox.y - b.bbox.y)[0];
-      if (verticalValue) pushCandidate(candidates, [verticalValue], definition.kind, normalizeCompact(verticalValue.text), definition.reason);
+        .sort((a, b) => a.bbox.y - b.bbox.y);
+      const selectedVerticalValues = gradeRowCenters.length > 0 ? verticalValues : verticalValues.slice(0, 1);
+      selectedVerticalValues.forEach((verticalValue) =>
+        pushCandidate(candidates, [verticalValue], definition.kind, normalizeCompact(verticalValue.text), definition.reason),
+      );
     }
   }
 
@@ -877,8 +1042,10 @@ function findSchoolRecordFields(
           pushWordSliceCandidate(candidates, word, match[1], 'class', '학급(반) 항목');
         }
       }
-      for (const match of normalized.matchAll(/(\d{1,3})\s*번(?:호)?/g)) {
-        pushWordSliceCandidate(candidates, word, match[1], 'student-number', '학생 번호 항목');
+      if (!lineHasActivityContext && identityContext) {
+        for (const match of normalized.matchAll(/(\d{1,3})\s*번(?:호)?/g)) {
+          pushWordSliceCandidate(candidates, word, match[1], 'student-number', '학생 번호 항목');
+        }
       }
 
       const compact = normalizeCompact(word.text);

@@ -18,7 +18,8 @@ import { deploymentAssetPath } from './deployment-path';
 const MAX_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_PAGES = 50;
 const RENDER_SCALE = 200 / 72;
-
+const PDFJS_CMAP_URL = deploymentAssetPath('cmaps/');
+const PDFJS_STANDARD_FONT_DATA_URL = deploymentAssetPath('standard_fonts/');
 export interface ProcessingProgress {
   stage: ProcessingStage;
   progress: number;
@@ -338,8 +339,10 @@ export function startPdfAnalysis(
       loadingTask = pdfjs.getDocument({
         data: bytes,
         password,
-        stopAtErrors: true,
-      });
+        cMapUrl: PDFJS_CMAP_URL,
+        cMapPacked: true,
+        standardFontDataUrl: PDFJS_STANDARD_FONT_DATA_URL,
+        stopAtErrors: true,      });
       documentProxy = await loadingTask.promise;
 
       if (documentProxy.numPages > MAX_PAGES) {
@@ -373,6 +376,7 @@ export function startPdfAnalysis(
       };
 
       const pages: PageReviewState[] = [];
+      let isSchoolRecordDocument = false;
       for (let pageNumber = 1; pageNumber <= totalPages; pageNumber += 1) {
         ensureActive();
         activePage = pageNumber - 1;
@@ -443,6 +447,10 @@ export function startPdfAnalysis(
           );
           words = mergeNativeAndOcrWords(nativeWords, ocrWords);
         }
+        if (/학교생활(?:세부사항)?기록부|대입전형자료/.test(words.map((word) => word.text.replace(/\s+/g, '')).join(''))) {
+          isSchoolRecordDocument = true;
+        }
+
         const imageBlob = await canvasToBlob(canvas, 'image/jpeg', 0.92);
         const imageUrl = URL.createObjectURL(imageBlob);
         createdUrls.push(imageUrl);
@@ -463,6 +471,7 @@ export function startPdfAnalysis(
             pageHeight: canvas.height,
             pageCount: totalPages,
             imageBounds: nativeImageBounds,
+            isSchoolRecordDocument,
           }),
           reviewed: false,
         });

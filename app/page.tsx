@@ -132,9 +132,11 @@ function Header({ onReset, hasDocument }: { onReset: () => void; hasDocument: bo
     <header className="border-b border-border/80 bg-background/95 backdrop-blur">
       <div className="mx-auto flex h-16 max-w-[1600px] items-center justify-between px-4 sm:px-6 lg:px-8">
         <div className="flex items-center gap-3">
-          <span className="grid size-10 shrink-0 place-items-center">
-            <img src={deploymentAssetPath("favicon.svg")} alt="" className="size-10" />
-          </span>
+          <span
+            aria-hidden="true"
+            className="size-10 shrink-0 bg-contain bg-center bg-no-repeat"
+            style={{ backgroundImage: `url(${deploymentAssetPath('favicon.svg')})` }}
+          />
           <div>
             <p className="text-[15px] font-bold tracking-[-0.02em]">가림PDF</p>
             <p className="text-[11px] text-muted-foreground">학교생활기록부 비식별화 도구</p>
