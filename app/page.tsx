@@ -11,25 +11,42 @@ import {
 } from 'react';
 import {
   AlertCircle,
+  Archive,
   Check,
   CheckCircle2,
   Download,
+  FileArchive,
   FileText,
   Grip,
   LockKeyhole,
   ListChecks,
+  Pause,
+  Play,
   Plus,
   RotateCcw,
   ScanSearch,
   ShieldCheck,
   SquareDashedMousePointer,
   Trash2,
+  WandSparkles,
   X,
   ZoomIn,
   ZoomOut,
 } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
+import {
+  batchArchiveName,
+  batchOverallProgress,
+  batchStatusLabel,
+  createBatchArchive,
+  createBatchItems,
+  MAX_BATCH_FILES,
+  nextQueuedItem,
+  validateBatchSelection,
+  type BatchItem,
+  type BatchMode,
+} from '@/lib/batch-processing';
 import {
   AlertDialog,
   AlertDialogAction,
@@ -175,6 +192,9 @@ export default function Home() {
   const gestureRef = useRef<Gesture | null>(null);
   const passwordRef = useRef<string | undefined>(undefined);
   const pendingPasswordFileRef = useRef<File | null>(null);
+  const batchItemsRef = useRef<BatchItem[]>([]);
+  const activeBatchItemIdRef = useRef<string | null>(null);
+  const batchPausedRef = useRef(false);
 
   const [file, setFile] = useState<File | null>(null);
   const [pages, setPages] = useState<PageReviewState[]>([]);
@@ -193,10 +213,21 @@ export default function Home() {
   const [isUnreviewedExportOpen, setIsUnreviewedExportOpen] = useState(false);
   const [passwordPrompt, setPasswordPrompt] = useState<'required' | 'incorrect' | null>(null);
   const [passwordInput, setPasswordInput] = useState('');
+  const [batchItems, setBatchItems] = useState<BatchItem[]>([]);
+  const [batchMode, setBatchMode] = useState<BatchMode>('review');
+  const [batchStarted, setBatchStarted] = useState(false);
+  const [batchPaused, setBatchPaused] = useState(false);
+  const [activeBatchItemId, setActiveBatchItemId] = useState<string | null>(null);
+  const [isAutomaticConfirmOpen, setIsAutomaticConfirmOpen] = useState(false);
+  const [isCreatingArchive, setIsCreatingArchive] = useState(false);
 
   useEffect(() => {
     pagesRef.current = pages;
   }, [pages]);
+
+  useEffect(() => {
+    batchItemsRef.current = batchItems;
+  }, [batchItems]);
 
   const releasePageUrls = useCallback((states: PageReviewState[]) => {
     states.forEach((page) => URL.revokeObjectURL(page.imageUrl));
@@ -264,6 +295,14 @@ export default function Home() {
     return () => lifecycle.abort();
   }, [configureNames]);
 
+  const updateBatchItem = useCallback((id: string, updates: Partial<BatchItem>) => {
+    setBatchItems((current) => {
+      const next = current.map((item) => (item.id === id ? { ...item, ...updates } : item));
+      batchItemsRef.current = next;
+      return next;
+    });
+  }, []);
+
   const resetDocument = useCallback(async () => {
     await analysisTaskRef.current?.cancel();
     analysisTaskRef.current = null;
@@ -284,6 +323,16 @@ export default function Home() {
     pendingPasswordFileRef.current = null;
     setPasswordPrompt(null);
     setPasswordInput('');
+    batchPausedRef.current = false;
+    activeBatchItemIdRef.current = null;
+    batchItemsRef.current = [];
+    setBatchItems([]);
+    setBatchMode('review');
+    setBatchStarted(false);
+    setBatchPaused(false);
+    setActiveBatchItemId(null);
+    setIsAutomaticConfirmOpen(false);
+    setIsCreatingArchive(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, [releasePageUrls]);
 
@@ -349,15 +398,326 @@ export default function Home() {
     [enteredNames, releasePageUrls],
   );
 
+  const processBatchItem = useCallback(
+    async (item: BatchItem, password?: string) => {
+      if (activeBatchItemIdRef.current && activeBatchItemIdRef.current !== item.id) return;
+      activeBatchItemIdRef.current = item.id;
+      setActiveBatchItemId(item.id);
+      updateBatchItem(item.id, {
+        status: 'analyzing',
+        progress: 0,
+        message: 'PDF 구조를 확인하고 있어요.',
+        error: undefined,
+      });
+      if (password === undefined) passwordRef.current = undefined;
+      releasePageUrls(pagesRef.current);
+      pagesRef.current = [];
+      setPages([]);
+      setFile(item.file);
+      setError(null);
+      setProgress(0);
+      setStage('loading');
+      setCurrentPageIndex(0);
+
+      const task = startPdfAnalysis(
+        item.file,
+        enteredNames,
+        (nextProgress) => {
+          setStage(nextProgress.stage);
+          setProgress(nextProgress.progress);
+          setProgressMessage(nextProgress.message);
+          updateBatchItem(item.id, {
+            status: 'analyzing',
+            progress: nextProgress.progress,
+            message: nextProgress.message,
+          });
+        },
+        password,
+      );
+      analysisTaskRef.current = task;
+
+      try {
+        const nextPages = await task.run;
+        pagesRef.current = nextPages;
+        const automatic = batchMode === 'automatic' && !item.reviewRequested;
+        const candidateCount = nextPages.reduce(
+          (count, page) => count + page.redactions.filter((candidate) => candidate.selected).length,
+          0,
+        );
+
+        if (automatic && candidateCount === 0) {
+          releasePageUrls(nextPages);
+          pagesRef.current = [];
+          setPages([]);
+          setFile(null);
+          setStage('idle');
+          updateBatchItem(item.id, {
+            status: 'needs-review',
+            progress: 100,
+            message: '자동 탐지 후보가 없어 직접 검토가 필요합니다.',
+            error: '자동 탐지 후보 없음',
+          });
+          passwordRef.current = undefined;
+          pendingPasswordFileRef.current = null;
+          activeBatchItemIdRef.current = null;
+          setActiveBatchItemId(null);
+          return;
+        }
+
+        if (automatic) {
+          updateBatchItem(item.id, {
+            status: 'exporting',
+            progress: 0,
+            message: '비식별화 PDF를 만들고 있어요.',
+          });
+          setStage('exporting');
+          const bytes = await exportRedactedPdf(
+            await item.file.arrayBuffer(),
+            nextPages,
+            (nextProgress) => {
+              setStage(nextProgress.stage);
+              setProgress(nextProgress.progress);
+              setProgressMessage(nextProgress.message);
+              updateBatchItem(item.id, {
+                status: 'exporting',
+                progress: nextProgress.progress,
+                message: nextProgress.message,
+              });
+            },
+            password,
+          );
+          const outputBuffer = bytes.buffer.slice(
+            bytes.byteOffset,
+            bytes.byteOffset + bytes.byteLength,
+          ) as ArrayBuffer;
+          const output = new Blob([outputBuffer], { type: 'application/pdf' });
+          releasePageUrls(nextPages);
+          pagesRef.current = [];
+          setPages([]);
+          setFile(null);
+          setStage('idle');
+          updateBatchItem(item.id, {
+            status: 'complete',
+            progress: 100,
+            message: '처리가 완료됐습니다.',
+            output,
+            reviewRequested: false,
+          });
+          passwordRef.current = undefined;
+          pendingPasswordFileRef.current = null;
+          activeBatchItemIdRef.current = null;
+          setActiveBatchItemId(null);
+          return;
+        }
+
+        setPages(nextPages);
+        setStage('review');
+        setProgress(100);
+        setProgressMessage('탐지가 끝났어요. 각 페이지를 확인해 주세요.');
+        updateBatchItem(item.id, {
+          status: 'reviewing',
+          progress: 100,
+          message: '탐지 결과를 검토해 주세요.',
+        });
+        passwordRef.current = password;
+        pendingPasswordFileRef.current = null;
+        setPasswordPrompt(null);
+        setPasswordInput('');
+      } catch (processingError) {
+        const message = processingError instanceof Error
+          ? processingError.message
+          : 'PDF를 처리하는 중 알 수 없는 오류가 발생했습니다.';
+        releasePageUrls(pagesRef.current);
+        pagesRef.current = [];
+        setPages([]);
+
+        if (processingError instanceof ProcessingCancelledError) {
+          passwordRef.current = undefined;
+          pendingPasswordFileRef.current = null;
+          setPasswordInput('');
+          setPasswordPrompt(null);
+          setFile(null);
+          setStage('idle');
+          updateBatchItem(item.id, {
+            status: 'queued',
+            progress: 0,
+            message: batchPausedRef.current ? '일괄처리가 일시정지됐습니다.' : '처리 대기 중',
+          });
+          activeBatchItemIdRef.current = null;
+          setActiveBatchItemId(null);
+        } else if (
+          processingError instanceof PdfProcessingError
+          && (processingError.code === 'password-required' || processingError.code === 'incorrect-password')
+        ) {
+          passwordRef.current = undefined;
+          pendingPasswordFileRef.current = item.file;
+          setStage('idle');
+          setError(null);
+          setPasswordInput('');
+          setPasswordPrompt(processingError.code === 'incorrect-password' ? 'incorrect' : 'required');
+          updateBatchItem(item.id, {
+            status: 'awaiting-password',
+            progress: 0,
+            message: 'PDF 비밀번호 입력을 기다리고 있습니다.',
+            error: undefined,
+          });
+        } else {
+          passwordRef.current = undefined;
+          pendingPasswordFileRef.current = null;
+          setPasswordInput('');
+          setPasswordPrompt(null);
+          setFile(null);
+          setStage('idle');
+          updateBatchItem(item.id, {
+            status: 'error',
+            progress: 100,
+            message: '이 파일을 처리하지 못했습니다.',
+            error: message,
+          });
+          activeBatchItemIdRef.current = null;
+          setActiveBatchItemId(null);
+        }
+      } finally {
+        if (analysisTaskRef.current === task) analysisTaskRef.current = null;
+      }
+    },
+    [batchMode, enteredNames, releasePageUrls, updateBatchItem],
+  );
+
+  useEffect(() => {
+    if (!batchStarted || batchPaused || passwordPrompt || activeBatchItemIdRef.current) return;
+    const next = nextQueuedItem(batchItems);
+    if (next) queueMicrotask(() => void processBatchItem(next));
+  }, [batchItems, batchPaused, batchStarted, passwordPrompt, processBatchItem]);
+
+  const handleSelectedFiles = useCallback(
+    (selectedFiles: File[]) => {
+      if (selectedFiles.length === 0) return;
+      const validationError = validateBatchSelection(selectedFiles);
+      if (validationError) {
+        setError(validationError);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        return;
+      }
+
+      void (async () => {
+        await resetDocument();
+        if (selectedFiles.length === 1) {
+          await processFile(selectedFiles[0]);
+          return;
+        }
+        const items = createBatchItems(selectedFiles);
+        batchItemsRef.current = items;
+        setBatchItems(items);
+        setError(null);
+      })();
+    },
+    [processFile, resetDocument],
+  );
+
   const handleDroppedFile = useCallback(
     (event: DragEvent<HTMLButtonElement>) => {
       event.preventDefault();
       setIsDraggingFile(false);
-      const droppedFile = event.dataTransfer.files[0];
-      if (droppedFile) void processFile(droppedFile);
+      handleSelectedFiles(Array.from(event.dataTransfer.files));
     },
-    [processFile],
+    [handleSelectedFiles],
   );
+
+  const startBatch = useCallback(() => {
+    if (batchMode === 'automatic') {
+      setIsAutomaticConfirmOpen(true);
+      return;
+    }
+    batchPausedRef.current = false;
+    setBatchPaused(false);
+    setBatchStarted(true);
+  }, [batchMode]);
+
+  const confirmAutomaticBatch = useCallback(() => {
+    setIsAutomaticConfirmOpen(false);
+    batchPausedRef.current = false;
+    setBatchPaused(false);
+    setBatchStarted(true);
+  }, []);
+
+  const pauseBatch = useCallback(async () => {
+    batchPausedRef.current = true;
+    setBatchPaused(true);
+    await analysisTaskRef.current?.cancel();
+  }, []);
+
+  const resumeBatch = useCallback(() => {
+    batchPausedRef.current = false;
+    setBatchPaused(false);
+  }, []);
+
+  const skipActiveBatchItem = useCallback(() => {
+    const itemId = activeBatchItemIdRef.current;
+    if (!itemId) return;
+    releasePageUrls(pagesRef.current);
+    pagesRef.current = [];
+    setPages([]);
+    setFile(null);
+    setStage('idle');
+    setError(null);
+    passwordRef.current = undefined;
+    pendingPasswordFileRef.current = null;
+    setPasswordPrompt(null);
+    setPasswordInput('');
+    updateBatchItem(itemId, {
+      status: 'skipped',
+      progress: 100,
+      message: '사용자가 이 파일을 건너뛰었습니다.',
+      error: '사용자가 건너뜀',
+    });
+    activeBatchItemIdRef.current = null;
+    setActiveBatchItemId(null);
+  }, [releasePageUrls, updateBatchItem]);
+
+  const reviewBatchItem = useCallback((itemId: string) => {
+    if (activeBatchItemIdRef.current) return;
+    updateBatchItem(itemId, {
+      status: 'queued',
+      progress: 0,
+      message: '직접 검토를 준비하고 있습니다.',
+      error: undefined,
+      reviewRequested: true,
+    });
+    batchPausedRef.current = false;
+    setBatchPaused(false);
+    setBatchStarted(true);
+  }, [updateBatchItem]);
+
+  const downloadBatchArchive = useCallback(async () => {
+    const currentItems = batchItemsRef.current;
+    if (!currentItems.some((item) => item.status === 'complete' && item.output)) return;
+    setIsCreatingArchive(true);
+    setError(null);
+    try {
+      const archive = await createBatchArchive(
+        currentItems.map((item) => ({
+          originalName: item.file.name,
+          status: item.status,
+          output: item.output,
+          error: item.error,
+        })),
+      );
+      const url = URL.createObjectURL(archive);
+      const anchor = Object.assign(document.createElement('a'), {
+        href: url,
+        download: batchArchiveName(),
+      });
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (archiveError) {
+      setError(archiveError instanceof Error ? archiveError.message : 'ZIP 파일을 만들지 못했습니다.');
+    } finally {
+      setIsCreatingArchive(false);
+    }
+  }, []);
 
   const addName = useCallback(() => {
     const value = nameInput.trim();
@@ -546,6 +906,15 @@ export default function Home() {
     setStage('exporting');
     setProgress(0);
     setProgressMessage('개인정보 삭제 엔진을 준비하고 있어요.');
+    const exportingBatchItemId = activeBatchItemIdRef.current;
+    if (exportingBatchItemId) {
+      updateBatchItem(exportingBatchItemId, {
+        status: 'exporting',
+        progress: 0,
+        message: '개인정보 삭제 엔진을 준비하고 있어요.',
+        error: undefined,
+      });
+    }
     try {
       const bytes = await exportRedactedPdf(
         await file.arrayBuffer(),
@@ -554,6 +923,13 @@ export default function Home() {
           setStage(nextProgress.stage);
           setProgress(nextProgress.progress);
           setProgressMessage(nextProgress.message);
+          if (exportingBatchItemId) {
+            updateBatchItem(exportingBatchItemId, {
+              status: 'exporting',
+              progress: nextProgress.progress,
+              message: nextProgress.message,
+            });
+          }
         },
         passwordRef.current,
       );
@@ -562,6 +938,27 @@ export default function Home() {
         bytes.byteOffset + bytes.byteLength,
       ) as ArrayBuffer;
       const blob = new Blob([outputBuffer], { type: 'application/pdf' });
+      const batchItemId = activeBatchItemIdRef.current;
+      if (batchItemId) {
+        updateBatchItem(batchItemId, {
+          status: 'complete',
+          progress: 100,
+          message: '검토와 PDF 생성이 완료됐습니다.',
+          output: blob,
+          reviewRequested: false,
+        });
+        releasePageUrls(pagesToExport);
+        pagesRef.current = [];
+        setPages([]);
+        setFile(null);
+        passwordRef.current = undefined;
+        pendingPasswordFileRef.current = null;
+        activeBatchItemIdRef.current = null;
+        setActiveBatchItemId(null);
+        setStage('idle');
+        return;
+      }
+
       const url = URL.createObjectURL(blob);
       const anchor = Object.assign(document.createElement('a'), {
         href: url,
@@ -577,9 +974,19 @@ export default function Home() {
       setStage('complete');
     } catch (exportError) {
       setStage('review');
-      setError(exportError instanceof Error ? exportError.message : '새 PDF를 만들지 못했습니다.');
+      const message = exportError instanceof Error ? exportError.message : '새 PDF를 만들지 못했습니다.';
+      setError(message);
+      const batchItemId = activeBatchItemIdRef.current;
+      if (batchItemId) {
+        updateBatchItem(batchItemId, {
+          status: 'reviewing',
+          progress: 100,
+          message: 'PDF 생성에 실패했습니다. 검토 후 다시 시도해 주세요.',
+          error: message,
+        });
+      }
     }
-  }, [file, pages]);
+  }, [file, pages, releasePageUrls, updateBatchItem]);
 
   const requestDownload = useCallback(() => {
     if (!allReviewed) {
@@ -591,17 +998,32 @@ export default function Home() {
 
   const isProcessing = ['loading', 'rendering', 'ocr'].includes(stage);
   const isWorkspace = pages.length > 0;
+  const isBatch = batchItems.length > 1;
+  const completedBatchCount = batchItems.filter((item) => item.status === 'complete').length;
+  const batchNeedsReviewCount = batchItems.filter((item) => item.status === 'needs-review').length;
+  const batchFailedCount = batchItems.filter((item) => item.status === 'error' || item.status === 'skipped').length;
+  const batchHasOutput = batchItems.some((item) => item.status === 'complete' && item.output);
+  const batchIsFinished = batchStarted
+    && !activeBatchItemId
+    && !batchItems.some((item) => ['queued', 'analyzing', 'exporting', 'reviewing', 'awaiting-password'].includes(item.status));
+  const overallBatchProgress = batchOverallProgress(batchItems);
   const retryWithPassword = useCallback(() => {
     const pendingFile = pendingPasswordFileRef.current;
     if (!pendingFile || !passwordInput) return;
     passwordRef.current = passwordInput;
     setPasswordPrompt(null);
+    const batchItemId = activeBatchItemIdRef.current;
+    if (batchItemId) {
+      const item = batchItemsRef.current.find((candidate) => candidate.id === batchItemId);
+      if (item) void processBatchItem(item, passwordInput);
+      return;
+    }
     void processFile(pendingFile, passwordInput);
-  }, [passwordInput, processFile]);
+  }, [passwordInput, processBatchItem, processFile]);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
-      <Header onReset={() => void resetDocument()} hasDocument={Boolean(file)} />
+      <Header onReset={() => void resetDocument()} hasDocument={Boolean(file) || isBatch} />
 
       {!isWorkspace ? (
         <section className="mx-auto grid max-w-[1480px] gap-8 px-5 py-8 lg:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)] lg:px-8 lg:py-12">
@@ -619,7 +1041,125 @@ export default function Home() {
               </span>
             </div>
 
-            {isProcessing ? (
+            {isBatch ? (
+              batchStarted ? (
+                <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-border bg-muted/45 px-6 py-12 text-center">
+                  <span className="relative mb-6 grid size-20 place-items-center rounded-3xl bg-background shadow-sm">
+                    {batchIsFinished ? (
+                      <Archive className="size-9 text-emerald-700" aria-hidden="true" />
+                    ) : (
+                      <FileArchive className="size-9 text-primary" aria-hidden="true" />
+                    )}
+                    {!batchIsFinished && !batchPaused && (
+                      <span className="absolute -right-1 -top-1 size-4 animate-pulse rounded-full border-2 border-background bg-emerald-500" />
+                    )}
+                  </span>
+                  <h2 className="text-xl font-bold">
+                    {batchIsFinished
+                      ? '일괄처리가 끝났습니다'
+                      : batchPaused
+                        ? '일괄처리가 일시정지됐습니다'
+                        : file?.name ?? '다음 파일을 준비하고 있어요'}
+                  </h2>
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    {batchIsFinished
+                      ? `완료 ${completedBatchCount}개 · 검토 필요 ${batchNeedsReviewCount}개 · 오류/건너뜀 ${batchFailedCount}개`
+                      : batchPaused
+                        ? '현재 순서부터 안전하게 다시 시작할 수 있습니다.'
+                        : progressMessage || '파일을 순서대로 처리하고 있습니다.'}
+                  </p>
+                  <Progress className="mt-7 w-full max-w-md" value={overallBatchProgress}>
+                    <ProgressLabel>전체 진행률</ProgressLabel>
+                    <span className="ml-auto text-sm tabular-nums text-muted-foreground">{overallBatchProgress}%</span>
+                  </Progress>
+                  <div className="mt-7 flex flex-wrap justify-center gap-2">
+                    {batchPaused ? (
+                      <Button onClick={resumeBatch}>
+                        <Play aria-hidden="true" />계속 처리
+                      </Button>
+                    ) : !batchIsFinished ? (
+                      <Button variant="outline" onClick={() => void pauseBatch()}>
+                        <Pause aria-hidden="true" />일시정지
+                      </Button>
+                    ) : null}
+                    <Button
+                      disabled={!batchHasOutput || isCreatingArchive}
+                      onClick={() => void downloadBatchArchive()}
+                    >
+                      <Download aria-hidden="true" />
+                      {isCreatingArchive ? 'ZIP 생성 중' : '결과 ZIP 저장'}
+                    </Button>
+                  </div>
+                  {batchNeedsReviewCount > 0 && (
+                    <p className="mt-5 max-w-lg text-xs leading-5 text-amber-800">
+                      자동 후보가 없던 파일은 오른쪽 목록의 ‘검토’ 버튼으로 열어 직접 영역을 지정할 수 있습니다.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="flex flex-1 flex-col rounded-2xl border border-border bg-muted/35 p-5 sm:p-7">
+                  <div className="flex items-center gap-3">
+                    <span className="grid size-11 place-items-center rounded-2xl bg-secondary text-primary">
+                      <FileArchive className="size-5" aria-hidden="true" />
+                    </span>
+                    <div>
+                      <h2 className="text-lg font-bold">PDF {batchItems.length}개 일괄처리</h2>
+                      <p className="text-sm text-muted-foreground">모든 파일에 적용할 처리 방식을 선택하세요.</p>
+                    </div>
+                  </div>
+                  <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                    <button
+                      type="button"
+                      aria-pressed={batchMode === 'review'}
+                      className={`rounded-xl border p-4 text-left transition ${batchMode === 'review' ? 'border-primary bg-secondary/70' : 'border-border bg-background hover:border-primary/40'}`}
+                      onClick={() => setBatchMode('review')}
+                    >
+                      <ListChecks className="mb-3 size-5 text-primary" aria-hidden="true" />
+                      <span className="block text-sm font-bold">파일별 순차 검토</span>
+                      <span className="mt-1 block text-xs leading-5 text-muted-foreground">각 파일의 후보를 직접 확인한 뒤 결과에 추가합니다.</span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={batchMode === 'automatic'}
+                      className={`rounded-xl border p-4 text-left transition ${batchMode === 'automatic' ? 'border-primary bg-secondary/70' : 'border-border bg-background hover:border-primary/40'}`}
+                      onClick={() => setBatchMode('automatic')}
+                    >
+                      <WandSparkles className="mb-3 size-5 text-primary" aria-hidden="true" />
+                      <span className="block text-sm font-bold">자동 처리</span>
+                      <span className="mt-1 block text-xs leading-5 text-muted-foreground">탐지 후보를 모두 적용하고 검토가 필요한 파일만 분리합니다.</span>
+                    </button>
+                  </div>
+                  <div className="mt-5 max-h-56 space-y-2 overflow-y-auto">
+                    {batchItems.map((item, index) => (
+                      <div key={item.id} className="flex items-center gap-3 rounded-xl border border-border bg-background px-3 py-2.5">
+                        <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-muted text-xs font-bold">{index + 1}</span>
+                        <span className="min-w-0 flex-1 truncate text-sm font-semibold">{item.file.name}</span>
+                        <span className="shrink-0 text-xs text-muted-foreground">{Math.max(1, Math.round(item.file.size / 1024 / 1024))}MB</span>
+                        <Button
+                          size="icon-sm"
+                          variant="ghost"
+                          disabled={batchItems.length <= 2}
+                          aria-label={`${item.file.name} 제거`}
+                          onClick={() => {
+                            const next = batchItems.filter((candidate) => candidate.id !== item.id);
+                            batchItemsRef.current = next;
+                            setBatchItems(next);
+                          }}
+                        >
+                          <Trash2 />
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-auto pt-6">
+                    <Button className="w-full" onClick={startBatch}>
+                      {batchMode === 'automatic' ? <WandSparkles aria-hidden="true" /> : <ListChecks aria-hidden="true" />}
+                      {batchMode === 'automatic' ? '자동 일괄처리 시작' : '순차 검토 시작'}
+                    </Button>
+                  </div>
+                </div>
+              )
+            ) : isProcessing ? (
               <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-border bg-muted/45 px-6 py-14 text-center">
                 <span className="relative mb-6 grid size-20 place-items-center rounded-3xl bg-background shadow-sm">
                   <FileText className="size-9 text-primary" aria-hidden="true" />
@@ -669,7 +1209,7 @@ export default function Home() {
                     학생 성명 · 주민등록번호 · 주소 · 사진 · 담임 성명 · 출력자 · 학교명(출신중학교 포함) · 학급(반) · 번호
                   </span>
                 </span>
-                <span className="mt-3 text-xs text-muted-foreground">PDF 1개 · 최대 50MB · 최대 50쪽</span>
+                <span className="mt-3 text-xs text-muted-foreground">PDF 1~{MAX_BATCH_FILES}개 · 파일당 최대 50MB · 최대 50쪽</span>
                 <span className="mt-6 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-sm">
                   파일 선택
                 </span>
@@ -680,10 +1220,8 @@ export default function Home() {
               className="sr-only"
               type="file"
               accept="application/pdf,.pdf"
-              onChange={(event) => {
-                const nextFile = event.target.files?.[0];
-                if (nextFile) void processFile(nextFile);
-              }}
+              multiple
+              onChange={(event) => handleSelectedFiles(Array.from(event.target.files ?? []))}
             />
             {error && (
               <div role="alert" className="mt-4 flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
@@ -700,6 +1238,55 @@ export default function Home() {
           </div>
 
           <aside className="space-y-5">
+            {isBatch && (
+              <section className="rounded-[24px] border border-border bg-card p-5 shadow-[0_18px_50px_rgba(28,34,31,0.06)]">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="font-bold">파일 처리 현황</h2>
+                    <p className="text-xs text-muted-foreground">{completedBatchCount}/{batchItems.length}개 완료</p>
+                  </div>
+                  <Badge variant="secondary">{batchMode === 'automatic' ? '자동' : '검토'}</Badge>
+                </div>
+                <div className="max-h-[360px] space-y-2 overflow-y-auto pr-1">
+                  {batchItems.map((item) => (
+                    <div
+                      key={item.id}
+                      className={`rounded-xl border p-3 ${item.id === activeBatchItemId ? 'border-primary bg-secondary/45' : 'border-border bg-background'}`}
+                    >
+                      <div className="flex items-start gap-2">
+                        <FileText className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden="true" />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-sm font-semibold">{item.file.name}</p>
+                          <p className={`mt-1 text-xs ${
+                            item.status === 'complete'
+                              ? 'text-emerald-700'
+                              : item.status === 'error' || item.status === 'skipped'
+                                ? 'text-red-700'
+                                : item.status === 'needs-review' || item.status === 'awaiting-password'
+                                  ? 'text-amber-700'
+                                  : 'text-muted-foreground'
+                          }`}>
+                            {batchStatusLabel(item.status)}
+                            {item.message ? ` · ${item.message}` : ''}
+                          </p>
+                        </div>
+                        {item.status === 'needs-review' && !activeBatchItemId && (
+                          <Button size="sm" variant="outline" onClick={() => reviewBatchItem(item.id)}>
+                            검토
+                          </Button>
+                        )}
+                      </div>
+                      {(item.status === 'analyzing' || item.status === 'exporting') && (
+                        <Progress className="mt-2" value={item.progress} aria-label={`${item.file.name} 진행률`} />
+                      )}
+                      {item.error && item.status === 'error' && (
+                        <p className="mt-2 text-xs leading-5 text-red-700">{item.error}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
             <section className="rounded-[24px] border border-border bg-card p-6 shadow-[0_18px_50px_rgba(28,34,31,0.06)]">
               <div className="mb-5 flex items-center gap-3">
                 <span className="grid size-9 place-items-center rounded-xl bg-secondary text-primary">
@@ -717,12 +1304,19 @@ export default function Home() {
                   maxLength={20}
                   placeholder="예: 홍길동"
                   aria-label="삭제할 이름"
+                  disabled={isBatch && batchStarted}
                   onChange={(event) => setNameInput(event.target.value)}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter') addName();
                   }}
                 />
-                <Button className="h-10 px-4" disabled={nameInput.trim().length < 2} onClick={addName}>추가</Button>
+                <Button
+                  className="h-10 px-4"
+                  disabled={nameInput.trim().length < 2 || (isBatch && batchStarted)}
+                  onClick={addName}
+                >
+                  추가
+                </Button>
               </div>
               {enteredNames.length > 0 && (
                 <div className="mt-4 flex flex-wrap gap-2">
@@ -732,7 +1326,8 @@ export default function Home() {
                       <button
                         type="button"
                         aria-label={`${name} 삭제`}
-                        className="rounded-full p-0.5 hover:bg-primary/10"
+                        className="rounded-full p-0.5 hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={isBatch && batchStarted}
                         onClick={() => configureNames(enteredNames.filter((item) => item !== name))}
                       >
                         <X className="size-3" />
@@ -769,6 +1364,40 @@ export default function Home() {
         </section>
       ) : (
         <section className="mx-auto max-w-[1600px] px-3 py-4 sm:px-5 lg:px-8">
+          {isBatch && (
+            <div className="mb-3 rounded-2xl border border-border bg-card px-4 py-3 shadow-sm">
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="min-w-[180px] flex-1">
+                  <div className="mb-1.5 flex items-center justify-between text-xs">
+                    <span className="font-bold">일괄처리 {completedBatchCount}/{batchItems.length}</span>
+                    <span className="text-muted-foreground">{overallBatchProgress}%</span>
+                  </div>
+                  <Progress value={overallBatchProgress} aria-label="일괄처리 전체 진행률" />
+                </div>
+                <Button variant="outline" size="sm" onClick={skipActiveBatchItem}>
+                  <X aria-hidden="true" />이 파일 건너뛰기
+                </Button>
+              </div>
+              <div className="mt-3 flex gap-2 overflow-x-auto pb-1">
+                {batchItems.map((item) => (
+                  <span
+                    key={item.id}
+                    className={`shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-semibold ${
+                      item.id === activeBatchItemId
+                        ? 'border-primary bg-secondary text-primary'
+                        : item.status === 'complete'
+                          ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                          : item.status === 'error' || item.status === 'skipped'
+                            ? 'border-red-200 bg-red-50 text-red-700'
+                            : 'border-border bg-muted text-muted-foreground'
+                    }`}
+                  >
+                    {item.file.name} · {batchStatusLabel(item.status)}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-border bg-card px-4 py-3 shadow-sm">
             <div className="flex min-w-0 items-center gap-3">
               <span className="grid size-9 shrink-0 place-items-center rounded-xl bg-secondary text-primary">
@@ -794,7 +1423,11 @@ export default function Home() {
                 onClick={requestDownload}
               >
                 <Download aria-hidden="true" />
-                {stage === 'exporting' ? `${progress}%` : '비식별화 PDF 저장'}
+                {stage === 'exporting'
+                  ? `${progress}%`
+                  : isBatch
+                    ? '이 파일 완료'
+                    : '비식별화 PDF 저장'}
               </Button>
             </div>
           </div>
@@ -1134,10 +1767,32 @@ export default function Home() {
           </AlertDialog>
         </section>
       )}
+      <Dialog open={isAutomaticConfirmOpen} onOpenChange={setIsAutomaticConfirmOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <AlertCircle className="size-5 text-amber-700" aria-hidden="true" />
+              검토 없이 자동 처리할까요?
+            </DialogTitle>
+            <DialogDescription>
+              자동 탐지는 개인정보를 놓치거나 일반 내용을 잘못 선택할 수 있습니다. 탐지 후보가 없는 파일은 결과에 포함하지 않고 직접 검토 대상으로 분리합니다.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setIsAutomaticConfirmOpen(false)}>설정으로 돌아가기</Button>
+            <Button onClick={confirmAutomaticBatch}>
+              <WandSparkles aria-hidden="true" />자동 처리 시작
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
       <Dialog
         open={passwordPrompt !== null}
         onOpenChange={(open) => {
-          if (!open) void resetDocument();
+          if (!open && passwordPrompt !== null) {
+            if (activeBatchItemIdRef.current) skipActiveBatchItem();
+            else void resetDocument();
+          }
         }}
       >
         <DialogContent className="sm:max-w-md">
@@ -1168,7 +1823,15 @@ export default function Home() {
             )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => void resetDocument()}>취소</Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                if (activeBatchItemIdRef.current) skipActiveBatchItem();
+                else void resetDocument();
+              }}
+            >
+              {activeBatchItemId ? '이 파일 건너뛰기' : '취소'}
+            </Button>
             <Button disabled={!passwordInput} onClick={retryWithPassword}>문서 열기</Button>
           </DialogFooter>
         </DialogContent>
