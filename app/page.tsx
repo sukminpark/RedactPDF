@@ -115,7 +115,9 @@ const kindLabels: Record<RedactionKind, string> = {
   'issuance-info': '발급정보',
   'issuance-number': '발급번호',
   'school-name': '학교명',
-  class: '학급(반)',  'student-number': '학생 번호',
+  'school-code': '학교코드',
+  class: '학급(반)',
+  'student-number': '학생 번호',
   manual: '수동 영역',
 };
 
@@ -134,6 +136,7 @@ const kindStyles: Record<RedactionKind, string> = {
   'issuance-info': 'border-orange-200 bg-orange-50 text-orange-700',
   'issuance-number': 'border-orange-200 bg-orange-50 text-orange-700',
   'school-name': 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  'school-code': 'border-emerald-200 bg-emerald-50 text-emerald-700',
   class: 'border-lime-200 bg-lime-50 text-lime-800',
   'student-number': 'border-teal-200 bg-teal-50 text-teal-700',
   manual: 'border-zinc-200 bg-zinc-100 text-zinc-700',
@@ -1026,17 +1029,17 @@ export default function Home() {
       <Header onReset={() => void resetDocument()} hasDocument={Boolean(file) || isBatch} />
 
       {!isWorkspace ? (
-        <section className="mx-auto grid max-w-[1480px] gap-8 px-5 py-8 lg:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)] lg:px-8 lg:py-12">
-          <div className="flex min-h-[610px] flex-col rounded-[28px] border border-border bg-card p-6 shadow-[0_22px_70px_rgba(28,34,31,0.08)] sm:p-9">
-            <div className="mb-7 flex items-start justify-between gap-4">
+        <section className="mx-auto grid max-w-[1480px] gap-6 px-5 py-4 lg:grid-cols-[minmax(0,1.2fr)_minmax(320px,0.8fr)] lg:gap-8 lg:px-8 lg:py-6">
+          <div className="flex flex-col rounded-[28px] border border-border bg-card p-5 shadow-[0_22px_70px_rgba(28,34,31,0.08)] sm:p-7">
+            <div className="mb-4 flex items-start justify-between gap-4 sm:mb-5">
               <div>
-                <p className="mb-2 text-sm font-medium text-muted-foreground sm:text-base">학교생활기록부, 대입전형자료</p>
-                <h1 className="max-w-xl text-3xl font-bold leading-[1.35] tracking-[-0.045em] sm:text-4xl">
+                <p className="mb-1 text-xs font-medium text-muted-foreground sm:text-sm">학교생활기록부, 대입전형자료</p>
+                <h1 className="max-w-xl text-2xl font-bold leading-[1.3] tracking-[-0.035em] sm:text-3xl">
                   개인정보를 지우고,
                   <br />안전한 파일로 다시 만드세요.
                 </h1>
               </div>
-              <span className="hidden size-12 place-items-center rounded-2xl bg-secondary text-primary sm:grid">
+              <span className="hidden size-11 place-items-center rounded-2xl bg-secondary text-primary sm:grid">
                 <ScanSearch className="size-6" aria-hidden="true" />
               </span>
             </div>
@@ -1182,7 +1185,7 @@ export default function Home() {
             ) : (
               <button
                 type="button"
-                className={`group flex flex-1 flex-col items-center justify-center rounded-2xl border-2 border-dashed px-6 py-14 text-center transition ${
+                className={`group flex flex-1 flex-col items-center justify-center rounded-2xl border-2 border-dashed px-5 py-6 text-center transition sm:py-8 ${
                   isDraggingFile
                     ? 'border-primary bg-primary/[0.06]'
                     : 'border-border bg-muted/45 hover:border-primary/50 hover:bg-muted/70'
@@ -1196,21 +1199,21 @@ export default function Home() {
                 onDragLeave={() => setIsDraggingFile(false)}
                 onDrop={handleDroppedFile}
               >
-                <span className="mb-5 grid size-16 place-items-center rounded-2xl border border-border bg-background shadow-sm transition group-hover:-translate-y-1">
-                  <FileText className="size-7 text-primary" aria-hidden="true" />
+                <span className="mb-3 grid size-12 place-items-center rounded-2xl border border-border bg-background shadow-sm transition group-hover:-translate-y-1 sm:size-14">
+                  <FileText className="size-6 text-primary sm:size-7" aria-hidden="true" />
                 </span>
-                <span className="text-lg font-bold">PDF 파일을 여기에 놓으세요</span>
-                <span className="mt-2 max-w-md text-sm leading-6 text-muted-foreground">
+                <span className="text-base font-bold sm:text-lg">PDF 파일을 여기에 놓으세요</span>
+                <span className="mt-1 max-w-md text-xs leading-5 text-muted-foreground sm:text-sm sm:leading-6">
                   문서는 서버로 전송하지 않고 이 기기 안에서만 분석합니다.
                 </span>
-                <span className="mt-5 max-w-lg rounded-xl border border-border bg-background/80 px-4 py-3 text-left">
+                <span className="mt-3 max-w-lg rounded-xl border border-border bg-background/80 px-3.5 py-2.5 text-left sm:mt-4 sm:px-4 sm:py-3">
                   <span className="block text-xs font-bold text-foreground">자동 식별 내역</span>
-                  <span className="mt-1.5 block text-xs leading-5 text-muted-foreground">
-                    학생 성명 · 주민등록번호 · 주소 · 사진 · 담임 성명 · 출력자 · 학교명(출신중학교 포함) · 학급(반) · 번호
+                  <span className="mt-1 block text-xs leading-normal text-muted-foreground">
+                    학생 성명 · 주민등록번호 · 주소 · 사진 · 담임 성명 · 출력자 · 학교명(출신중학교 포함) · 학교코드 · 학급(반) · 번호
                   </span>
                 </span>
-                <span className="mt-3 text-xs text-muted-foreground">PDF 1~{MAX_BATCH_FILES}개 · 파일당 최대 50MB · 최대 50쪽</span>
-                <span className="mt-6 rounded-lg bg-primary px-4 py-2.5 text-sm font-semibold text-primary-foreground shadow-sm">
+                <span className="mt-2 text-xs text-muted-foreground sm:mt-2.5">PDF 1~{MAX_BATCH_FILES}개 · 파일당 최대 50MB · 최대 50쪽</span>
+                <span className="mt-3.5 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 transition-colors sm:mt-4 sm:py-2.5">
                   파일 선택
                 </span>
               </button>
@@ -1237,7 +1240,7 @@ export default function Home() {
             )}
           </div>
 
-          <aside className="space-y-5">
+          <aside className="space-y-4">
             {isBatch && (
               <section className="rounded-[24px] border border-border bg-card p-5 shadow-[0_18px_50px_rgba(28,34,31,0.06)]">
                 <div className="mb-4 flex items-center justify-between gap-3">
@@ -1287,8 +1290,8 @@ export default function Home() {
                 </div>
               </section>
             )}
-            <section className="rounded-[24px] border border-border bg-card p-6 shadow-[0_18px_50px_rgba(28,34,31,0.06)]">
-              <div className="mb-5 flex items-center gap-3">
+            <section className="rounded-[24px] border border-border bg-card p-5 shadow-[0_18px_50px_rgba(28,34,31,0.06)]">
+              <div className="mb-3.5 flex items-center gap-3">
                 <span className="grid size-9 place-items-center rounded-xl bg-secondary text-primary">
                   <Plus className="size-4" aria-hidden="true" />
                 </span>
@@ -1338,7 +1341,7 @@ export default function Home() {
               )}
             </section>
 
-            <section className="rounded-[24px] border border-emerald-200 bg-emerald-50/70 p-6">
+            <section className="rounded-[24px] border border-emerald-200 bg-emerald-50/70 p-5">
               <div className="mb-4 flex items-center gap-3 text-emerald-900">
                 <ShieldCheck className="size-5" aria-hidden="true" />
                 <h2 className="font-bold">원본은 밖으로 나가지 않아요</h2>

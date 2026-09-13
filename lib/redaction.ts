@@ -15,6 +15,7 @@ export type RedactionKind =
   | 'issuance-number'
   | 'class'
   | 'student-number'
+  | 'school-code'
   | 'manual';
 
 export type ProcessingStage =
@@ -190,14 +191,24 @@ function pushCandidate(
     glyphs.length > 0 ? glyphs.map((glyph) => glyph.bbox) : words.map((word) => word.bbox),
     4,
   );
-  const duplicate = candidates.some(
+  const duplicate = candidates.find(
     (candidate) =>
       candidate.kind === kind &&
       Math.abs(candidate.x - rect.x) < 3 &&
       Math.abs(candidate.y - rect.y) < 3 &&
       Math.abs(candidate.width - rect.width) < 6,
   );
-  if (duplicate) return;
+  if (duplicate) {
+    if (duplicate.selectionMode === 'exact-glyphs' && glyphs.length > 0) {
+      for (const glyph of glyphs) {
+        if (!duplicate.targetGlyphIds.includes(glyph.id)) {
+          duplicate.targetGlyphIds.push(glyph.id);
+          duplicate.targetQuads.push({ source: glyph.source, quad: glyph.canonicalQuad, text: glyph.text });
+        }
+      }
+    }
+    return;
+  }
 
   candidates.push({
     id: `${words[0].pageIndex}-${kind}-${candidates.length}-${Math.round(rect.x)}-${Math.round(rect.y)}`,
@@ -269,12 +280,28 @@ function pushWordSliceCandidate(
       };
   const before = candidates.length;
   pushRectCandidate(candidates, word.pageIndex, kind, slice, reason, rect, word.confidence);
-  const candidate = candidates.length > before ? candidates.at(-1) : undefined;
+  const candidate = candidates.length > before
+    ? candidates.at(-1)
+    : candidates.find(
+        (item) =>
+          item.kind === kind &&
+          Math.abs(item.x - rect.x) < 4 &&
+          Math.abs(item.y - rect.y) < 4,
+      );
   const selectedText = selectedGlyphs.map((glyph) => glyph.text).join('').normalize('NFKC');
   if (candidate && selectedGlyphs.length === Array.from(slice).length && selectedText === slice.normalize('NFKC')) {
-    candidate.targetGlyphIds = selectedGlyphs.map((glyph) => glyph.id);
-    candidate.targetQuads = selectedGlyphs.map((glyph) => ({ source: glyph.source, quad: glyph.canonicalQuad, text: glyph.text }));
-    candidate.selectionMode = 'exact-glyphs';
+    if (candidates.length > before) {
+      candidate.targetGlyphIds = selectedGlyphs.map((glyph) => glyph.id);
+      candidate.targetQuads = selectedGlyphs.map((glyph) => ({ source: glyph.source, quad: glyph.canonicalQuad, text: glyph.text }));
+      candidate.selectionMode = 'exact-glyphs';
+    } else {
+      for (const glyph of selectedGlyphs) {
+        if (!candidate.targetGlyphIds.includes(glyph.id)) {
+          candidate.targetGlyphIds.push(glyph.id);
+          candidate.targetQuads.push({ source: glyph.source, quad: glyph.canonicalQuad, text: glyph.text });
+        }
+      }
+    }
   }
 }
 
@@ -310,12 +337,29 @@ function pushWordSliceRegionCandidate(
         width: characterWidth * Array.from(slice).length + leftPadding + rightPadding,
         height: word.bbox.height + verticalPadding * 2,
       };
+  const before = candidates.length;
   pushRectCandidate(candidates, word.pageIndex, kind, slice, reason, rect, word.confidence);
-  const candidate = candidates.at(-1);
+  const candidate = candidates.length > before
+    ? candidates.at(-1)
+    : candidates.find(
+        (item) =>
+          item.kind === kind &&
+          Math.abs(item.x - rect.x) < 4 &&
+          Math.abs(item.y - rect.y) < 4,
+      );
   if (candidate && hasExactGlyphs) {
-    candidate.targetGlyphIds = selectedGlyphs.map((glyph) => glyph.id);
-    candidate.targetQuads = selectedGlyphs.map((glyph) => ({ source: glyph.source, quad: glyph.canonicalQuad, text: glyph.text }));
-    candidate.selectionMode = 'exact-glyphs';
+    if (candidates.length > before) {
+      candidate.targetGlyphIds = selectedGlyphs.map((glyph) => glyph.id);
+      candidate.targetQuads = selectedGlyphs.map((glyph) => ({ source: glyph.source, quad: glyph.canonicalQuad, text: glyph.text }));
+      candidate.selectionMode = 'exact-glyphs';
+    } else {
+      for (const glyph of selectedGlyphs) {
+        if (!candidate.targetGlyphIds.includes(glyph.id)) {
+          candidate.targetGlyphIds.push(glyph.id);
+          candidate.targetQuads.push({ source: glyph.source, quad: glyph.canonicalQuad, text: glyph.text });
+        }
+      }
+    }
   }
 }
 function findResidentIds(lines: OcrWord[][], candidates: RedactionCandidate[]): void {
@@ -812,6 +856,80 @@ function findSchoolRecordFields(
   const documentText = allWords.map((word) => normalizeCompact(word.text)).join('');
   const isSchoolRecord = context.isSchoolRecordDocument
     ?? /학교생활(?:세부사항)?기록부|대입전형자료/.test(documentText);
+
+  // The first identity table in university-admission exports uses
+  // "학과(코드)" rather than the generic school-record "학과" header. Keep
+  // this layout-specific so class/number lookup is not broadened to unrelated
+  // tables elsewhere in a record.
+  const isAdmissionIdentitySection = isSchoolRecord
+    && pageIndex === 0
+    && documentText.includes('인적학적사항');
+  if (isAdmissionIdentitySection) {
+    const admissionHeaderNames = new Set([
+      '학교코드',
+      '학과코드',
+      '반',
+      '번호',
+      '성명',
+      '주민등록번호',
+    ]);
+    const headerRows = allWords
+      .filter((word) => normalizeCompact(word.text) === '학교코드')
+      .map((schoolCodeHeader) => {
+        const centerY = schoolCodeHeader.bbox.y + schoolCodeHeader.bbox.height / 2;
+        return allWords
+          .filter((word) =>
+            admissionHeaderNames.has(normalizeCompact(word.text))
+            && Math.abs(word.bbox.y + word.bbox.height / 2 - centerY)
+              <= Math.max(schoolCodeHeader.bbox.height, word.bbox.height) * 1.6,
+          )
+          .sort((left, right) => left.bbox.x - right.bbox.x);
+      });
+    const headers = headerRows.find((row) =>
+      ['학교코드', '학과코드', '반', '번호', '성명', '주민등록번호']
+        .every((label) => row.some((word) => normalizeCompact(word.text) === label)),
+    );
+
+    if (headers) {
+      const findFirstCellValue = (label: string, pattern: RegExp): OcrWord | undefined => {
+        const headerIndex = headers.findIndex((word) => normalizeCompact(word.text) === label);
+        const header = headers[headerIndex];
+        if (!header) return undefined;
+        const previous = headers[headerIndex - 1];
+        const next = headers[headerIndex + 1];
+        const left = previous
+          ? (previous.bbox.x + previous.bbox.width + header.bbox.x) / 2
+          : Math.max(0, header.bbox.x - pageWidth * 0.08);
+        const right = next
+          ? (header.bbox.x + header.bbox.width + next.bbox.x) / 2
+          : Math.min(pageWidth, header.bbox.x + header.bbox.width + pageWidth * 0.08);
+        return allWords
+          .filter((word) => {
+            const value = normalizeCompact(word.text);
+            const centerX = word.bbox.x + word.bbox.width / 2;
+            return pattern.test(value)
+              && word.bbox.y > header.bbox.y + header.bbox.height * 0.5
+              && word.bbox.y - header.bbox.y < Math.max(pageHeight * 0.08, header.bbox.height * 4)
+              && centerX >= left
+              && centerX <= right;
+          })
+          .sort((leftWord, rightWord) => leftWord.bbox.y - rightWord.bbox.y)[0];
+      };
+
+      const schoolCode = findFirstCellValue('학교코드', /^[A-Z]\d{9}$/i);
+      const classValue = findFirstCellValue('반', /^\d{1,2}$/);
+      const studentNumber = findFirstCellValue('번호', /^\d{1,3}$/);
+      if (schoolCode) {
+        pushCandidate(candidates, [schoolCode], 'school-code', normalizeCompact(schoolCode.text), '대입전형자료 학교코드 항목');
+      }
+      if (classValue) {
+        pushCandidate(candidates, [classValue], 'class', normalizeCompact(classValue.text), '대입전형자료 인적·학적사항 반 열');
+      }
+      if (studentNumber) {
+        pushCandidate(candidates, [studentNumber], 'student-number', normalizeCompact(studentNumber.text), '대입전형자료 인적·학적사항 번호 열');
+      }
+    }
+  }
 
   const ignoredSchoolLabels = new Set(['출신중학교', '출신고등학교', '전입학교', '졸업학교']);
   for (const word of allWords) {

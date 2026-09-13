@@ -170,6 +170,107 @@ describe('detectCandidates', () => {
     expect(result.some((item) => item.kind === 'student-number' && item.sourceText === '12')).toBe(true);
   });
 
+  it('finds the school code, class, and number in the first admission identity table', () => {
+    const section = wordsFromLine(['대입전형자료', '인적·학적 사항']);
+    section.forEach((word) => { word.lineId = 'section'; });
+    const headers = wordsFromLine(['학교코드', '학과(코드)', '반', '번호', '성명', '주민등록번호']);
+    const headerX = [20, 190, 400, 480, 550, 710];
+    headers.forEach((word, index) => {
+      word.bbox = { ...word.bbox, x: headerX[index], y: 80 };
+      word.lineId = `header-${index}`;
+    });
+    const values = wordsFromLine(['J100000673', '11', '2']);
+    const valueX = [45, 420, 500];
+    values.forEach((word, index) => {
+      word.bbox = { ...word.bbox, x: valueX[index], y: 125 };
+      word.lineId = `value-${index}`;
+    });
+
+    const result = detectCandidates([...section, ...headers, ...values], [], {
+      pageWidth: 900,
+      pageHeight: 1200,
+      isSchoolRecordDocument: true,
+    });
+
+    expect(result.some((item) => item.kind === 'school-code' && item.sourceText === 'J100000673')).toBe(true);
+    expect(result.some((item) => item.kind === 'class' && item.sourceText === '11')).toBe(true);
+    expect(result.some((item) => item.kind === 'student-number' && item.sourceText === '2')).toBe(true);
+  });
+
+  it('does not apply admission identity columns without the explicit section heading', () => {
+    const headers = wordsFromLine(['학교코드', '학과(코드)', '반', '번호', '성명', '주민등록번호']);
+    const headerX = [20, 190, 400, 480, 550, 710];
+    headers.forEach((word, index) => {
+      word.bbox = { ...word.bbox, x: headerX[index], y: 80 };
+      word.lineId = `header-${index}`;
+    });
+    const values = wordsFromLine(['J100000673', '11', '2']);
+    const valueX = [45, 420, 500];
+    values.forEach((word, index) => {
+      word.bbox = { ...word.bbox, x: valueX[index], y: 125 };
+      word.lineId = `value-${index}`;
+    });
+
+    const result = detectCandidates([...headers, ...values], [], {
+      pageWidth: 900,
+      pageHeight: 1200,
+      isSchoolRecordDocument: true,
+    });
+
+    expect(result.some((item) => item.kind === 'school-code')).toBe(false);
+    expect(result.some((item) => item.kind === 'class' || item.kind === 'student-number')).toBe(false);
+  });
+
+  it('preserves admission school glyph targets when subsequent duplicate school words appear', () => {
+    const section = wordsFromLine(['대입전형자료', '인적·학적사항']);
+    section.forEach((word) => { word.lineId = 'section'; word.bbox.y = 30; });
+
+    const stamp1 = wordsFromLine(['가림고등학교'])[0];
+    stamp1.id = 'stamp1';
+    stamp1.lineId = 'stamp1-line';
+    stamp1.bbox = { x: 480, y: 780, width: 80, height: 16 };
+    stamp1.glyphs.forEach((g, i) => {
+      g.id = `stamp1-g-${i}`;
+      g.bbox = { x: 480 + i * 13, y: 780, width: 13, height: 16 };
+    });
+
+    const admission = wordsFromLine(['가림고등학교'])[0];
+    admission.id = 'admission';
+    admission.lineId = 'admission-line';
+    admission.bbox = { x: 210, y: 220, width: 80, height: 16 };
+    admission.glyphs.forEach((g, i) => {
+      g.id = `admission-g-${i}`;
+      g.bbox = { x: 210 + i * 13, y: 220, width: 13, height: 16 };
+    });
+
+    const stamp2 = wordsFromLine(['가림고등학교'])[0];
+    stamp2.id = 'stamp2';
+    stamp2.lineId = 'stamp2-line';
+    stamp2.bbox = { x: 480, y: 780, width: 80, height: 16 };
+    stamp2.glyphs.forEach((g, i) => {
+      g.id = `stamp2-g-${i}`;
+      g.bbox = { x: 480 + i * 13, y: 780, width: 13, height: 16 };
+    });
+
+    const words = [...section, stamp1, admission, stamp2];
+    const result = detectCandidates(words, [], {
+      pageWidth: 900,
+      pageHeight: 1200,
+      isSchoolRecordDocument: true,
+    });
+
+    const admissionCand = result.find((item) => item.kind === 'school-name' && Math.abs(item.y - 220) < 15);
+    expect(admissionCand).toBeDefined();
+    expect(admissionCand?.targetGlyphIds).toEqual(admission.glyphs.map((g) => g.id));
+
+    const stampCand = result.find((item) => item.kind === 'school-name' && Math.abs(item.y - 780) < 15);
+    expect(stampCand).toBeDefined();
+    expect(stampCand?.targetGlyphIds).toEqual([
+      ...stamp1.glyphs.map((g) => g.id),
+      ...stamp2.glyphs.map((g) => g.id),
+    ]);
+  });
+
   it('finds horizontally laid out footer class and student-number values', () => {
     const words = wordsFromLine(['반', '3', '번호', '12']);
     words.forEach((word) => {
