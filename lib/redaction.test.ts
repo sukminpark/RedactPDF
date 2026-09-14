@@ -397,6 +397,32 @@ describe('detectCandidates', () => {
     expect(address!.width).toBeLessThan(words[2].bbox.x - address!.x);
   });
 
+  it('creates exact masks for each row of a wrapped address when PDF line IDs are shared', () => {
+    const words = wordsFromLine(['주소', '경기도안산시단원구고잔로160', '106호(선부동,한양아파트)', '2023년3월2일안산강서고등학교입학']);
+    const place = (word: OcrWord, x: number, y: number) => {
+      const deltaX = x - word.bbox.x;
+      const deltaY = y - word.bbox.y;
+      word.bbox = { ...word.bbox, x, y };
+      word.lineId = 'shared-government24-line';
+      word.glyphs.forEach((glyph) => {
+        glyph.bbox = { ...glyph.bbox, x: glyph.bbox.x + deltaX, y: glyph.bbox.y + deltaY };
+      });
+    };
+    place(words[0], 30, 20);
+    place(words[1], 100, 20);
+    place(words[2], 100, 48);
+    place(words[3], 100, 78);
+
+    const addresses = detectCandidates(words, []).filter((candidate) => candidate.kind === 'address');
+    const targetedGlyphIds = new Set(addresses.flatMap((candidate) => candidate.targetGlyphIds));
+
+    expect(addresses).toHaveLength(2);
+    expect(addresses.every((candidate) => candidate.selectionMode === 'exact-glyphs')).toBe(true);
+    expect(addresses.map((candidate) => candidate.y).sort((left, right) => left - right)).toEqual([16, 44]);
+    expect(targetedGlyphIds).toEqual(new Set([...words[1].glyphs, ...words[2].glyphs].map((glyph) => glyph.id)));
+    expect([...targetedGlyphIds].some((id) => words[3].glyphs.some((glyph) => glyph.id === id))).toBe(false);
+  });
+
   it('finds class, number, and name cells in a correction ledger', () => {
     const words = wordsFromLine(['정정대장', '성', '명', '항', '목', '11반', '9', '홍길동']);
     const place = (word: OcrWord, x: number, y: number, lineId: string) => {

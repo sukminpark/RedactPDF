@@ -11,11 +11,9 @@ import {
 } from 'react';
 import {
   AlertCircle,
-  Archive,
   Check,
   CheckCircle2,
   Download,
-  FileArchive,
   FileText,
   FolderOpen,
   Grip,
@@ -37,10 +35,8 @@ import {
 
 import { Badge } from '@/components/ui/badge';
 import {
-  batchArchiveName,
   batchOverallProgress,
   batchStatusLabel,
-  createBatchArchive,
   createBatchItems,
   MAX_BATCH_FILES,
   nextQueuedItem,
@@ -82,7 +78,12 @@ import {
 } from '@/lib/pdf-processing';
 import { PdfProcessingError } from '@/lib/mupdf-types';
 import { deploymentAssetPath } from '@/lib/deployment-path';
-import { isSavePickerCancelled, prepareBlobSaver, type SaveLocation } from '@/lib/file-output';
+import {
+  isSavePickerCancelled,
+  prepareBlobSaver,
+  saveBlobsToDirectory,
+  type SaveLocation,
+} from '@/lib/file-output';
 import {
   mergeAutomaticCandidates,
   sanitizeDownloadName,
@@ -240,11 +241,15 @@ export default function Home() {
   const [batchPaused, setBatchPaused] = useState(false);
   const [activeBatchItemId, setActiveBatchItemId] = useState<string | null>(null);
   const [isAutomaticConfirmOpen, setIsAutomaticConfirmOpen] = useState(false);
-  const [isCreatingArchive, setIsCreatingArchive] = useState(false);
+  const [isSavingBatchResults, setIsSavingBatchResults] = useState(false);
+  const [batchSaveNotice, setBatchSaveNotice] = useState<string | null>(null);
   const [saveLocation, setSaveLocation] = useState<SaveLocation | null>(null);
   const [canPickSourceFolder, setCanPickSourceFolder] = useState(false);
   const sourceDirectoryHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
   const sourceFileHandleRef = useRef<FileSystemFileHandle | null>(null);
+  const lastSaveLocationHandleRef = useRef<
+    FileSystemDirectoryHandle | FileSystemFileHandle | null
+  >(null);
 
   useEffect(() => {
     pagesRef.current = pages;
@@ -364,7 +369,8 @@ export default function Home() {
     setBatchPaused(false);
     setActiveBatchItemId(null);
     setIsAutomaticConfirmOpen(false);
-    setIsCreatingArchive(false);
+    setIsSavingBatchResults(false);
+    setBatchSaveNotice(null);
     setSaveLocation(null);
     sourceDirectoryHandleRef.current = null;
     sourceFileHandleRef.current = null;
@@ -777,38 +783,50 @@ export default function Home() {
     setBatchStarted(true);
   }, [updateBatchItem]);
 
-  const downloadBatchArchive = useCallback(async () => {
+  const downloadBatchResults = useCallback(async () => {
     const currentItems = batchItemsRef.current;
-    if (!currentItems.some((item) => item.status === 'complete' && item.output)) return;
-    setIsCreatingArchive(true);
+    const completedItems = currentItems.filter(
+      (item): item is BatchItem & { output: Blob } =>
+        item.status === 'complete' && item.output instanceof Blob,
+    );
+    if (completedItems.length === 0) return;
+    setIsSavingBatchResults(true);
     setError(null);
+    setBatchSaveNotice(null);
     try {
-      const saver = await prepareBlobSaver(
-        batchArchiveName(),
-        {
-          description: '가림PDF 일괄처리 결과',
-          mimeType: 'application/zip',
-          extension: '.zip',
-        },
-        sourceDirectoryHandleRef.current,
-        sourceFileHandleRef.current,
-      );
-      const archive = await createBatchArchive(
-        currentItems.map((item) => ({
-          originalName: item.file.name,
-          status: item.status,
-          output: item.output,
-          error: item.error,
+      const rememberedDirectory =
+        lastSaveLocationHandleRef.current?.kind === 'directory'
+          ? lastSaveLocationHandleRef.current
+          : null;
+      const directory = sourceDirectoryHandleRef.current
+        ?? rememberedDirectory
+        ?? await (async () => {
+          if (!('showDirectoryPicker' in window)) {
+            throw new Error('개별 파일 저장은 Chrome 또는 Edge에서 지원합니다.');
+          }
+          return (window as DirectoryPickerWindow).showDirectoryPicker({
+            id: 'garim-pdf-batch-output-folder',
+            mode: 'readwrite',
+          });
+        })();
+      await saveBlobsToDirectory(
+        directory,
+        completedItems.map((item) => ({
+          fileName: sanitizeDownloadName(item.file.name),
+          blob: item.output,
         })),
       );
-      await saver.save(archive);
-      setSaveLocation(saver.location);
-    } catch (archiveError) {
-      if (!isSavePickerCancelled(archiveError)) {
-        setError(archiveError instanceof Error ? archiveError.message : 'ZIP 파일을 만들지 못했습니다.');
+      lastSaveLocationHandleRef.current = directory;
+      setSaveLocation(sourceDirectoryHandleRef.current ? 'source-folder' : 'chosen-folder');
+      setBatchSaveNotice(
+        `완료된 PDF ${completedItems.length}개를 ${sourceDirectoryHandleRef.current ? '원본 폴더' : '선택한 폴더'}에 저장했습니다.`,
+      );
+    } catch (batchSaveError) {
+      if (!isSavePickerCancelled(batchSaveError)) {
+        setError(batchSaveError instanceof Error ? batchSaveError.message : 'PDF 파일을 저장하지 못했습니다.');
       }
     } finally {
-      setIsCreatingArchive(false);
+      setIsSavingBatchResults(false);
     }
   }, []);
 
@@ -1018,6 +1036,7 @@ export default function Home() {
         },
         sourceDirectoryHandleRef.current,
         sourceFileHandleRef.current,
+        lastSaveLocationHandleRef.current,
       );
       const bytes = await exportRedactedPdf(
         await file.arrayBuffer(),
@@ -1063,6 +1082,7 @@ export default function Home() {
       }
 
       await saver.save(blob);
+      lastSaveLocationHandleRef.current = saver.startIn ?? lastSaveLocationHandleRef.current;
       setSaveLocation(saver.location);
       passwordRef.current = undefined;
       setStage('complete');
@@ -1141,11 +1161,10 @@ export default function Home() {
               batchStarted ? (
                 <div className="flex flex-1 flex-col items-center justify-center rounded-2xl border border-border bg-muted/45 px-6 py-12 text-center">
                   <span className="relative mb-6 grid size-20 place-items-center rounded-3xl bg-background shadow-sm">
-                    {batchIsFinished ? (
-                      <Archive className="size-9 text-emerald-700" aria-hidden="true" />
-                    ) : (
-                      <FileArchive className="size-9 text-primary" aria-hidden="true" />
-                    )}
+                    <FileText
+                      className={batchIsFinished ? 'size-9 text-emerald-700' : 'size-9 text-primary'}
+                      aria-hidden="true"
+                    />
                     {!batchIsFinished && !batchPaused && (
                       <span className="absolute -right-1 -top-1 size-4 animate-pulse rounded-full border-2 border-background bg-emerald-500" />
                     )}
@@ -1179,13 +1198,18 @@ export default function Home() {
                       </Button>
                     ) : null}
                     <Button
-                      disabled={!batchHasOutput || isCreatingArchive}
-                      onClick={() => void downloadBatchArchive()}
+                      disabled={!batchHasOutput || isSavingBatchResults}
+                      onClick={() => void downloadBatchResults()}
                     >
                       <Download aria-hidden="true" />
-                      {isCreatingArchive ? 'ZIP 생성 중' : '결과 ZIP 저장'}
+                      {isSavingBatchResults ? '개별 PDF 저장 중' : '개별 PDF 저장'}
                     </Button>
                   </div>
+                  {batchSaveNotice ? (
+                    <p aria-live="polite" className="mt-5 max-w-lg text-xs leading-5 text-emerald-800">
+                      {batchSaveNotice}
+                    </p>
+                  ) : null}
                   {batchNeedsReviewCount > 0 && (
                     <p className="mt-5 max-w-lg text-xs leading-5 text-amber-800">
                       자동 후보가 없던 파일은 오른쪽 목록의 ‘검토’ 버튼으로 열어 직접 영역을 지정할 수 있습니다.
@@ -1196,7 +1220,7 @@ export default function Home() {
                 <div className="flex flex-1 flex-col rounded-2xl border border-border bg-muted/35 p-5 sm:p-7">
                   <div className="flex items-center gap-3">
                     <span className="grid size-11 place-items-center rounded-2xl bg-secondary text-primary">
-                      <FileArchive className="size-5" aria-hidden="true" />
+                      <FileText className="size-5" aria-hidden="true" />
                     </span>
                     <div>
                       <h2 className="text-lg font-bold">PDF {batchItems.length}개 일괄처리</h2>
@@ -1548,7 +1572,7 @@ export default function Home() {
           )}
           {stage === 'complete' && (
             <div aria-live="polite" className="mb-4 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800">
-              <CheckCircle2 className="size-4" aria-hidden="true" />
+              <CheckCircle2 className="size-4 shrink-0" aria-hidden="true" />
               {saveLocation === 'source-folder'
                 ? '원본 폴더에 새 PDF를 저장했습니다. 원본은 변경되지 않았어요.'
                 : saveLocation === 'chosen-folder'

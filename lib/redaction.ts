@@ -175,6 +175,30 @@ function lineGroups(words: OcrWord[]): OcrWord[][] {
     .sort((a, b) => Math.min(...a.map((word) => word.bbox.y)) - Math.min(...b.map((word) => word.bbox.y)));
 }
 
+function visualRowGroups(words: OcrWord[]): OcrWord[][] {
+  const rows: OcrWord[][] = [];
+  for (const word of [...words].sort((left, right) => left.bbox.y - right.bbox.y || left.bbox.x - right.bbox.x)) {
+    const wordCenterY = word.bbox.y + word.bbox.height / 2;
+    const row = rows.at(-1);
+    if (!row) {
+      rows.push([word]);
+      continue;
+    }
+    const rowCenterY = row.reduce((sum, candidate) => sum + candidate.bbox.y + candidate.bbox.height / 2, 0) / row.length;
+    const rowHeight = Math.max(...row.map((candidate) => candidate.bbox.height));
+    if (Math.abs(wordCenterY - rowCenterY) <= Math.max(rowHeight, word.bbox.height) * 0.7) {
+      row.push(word);
+    } else {
+      rows.push([word]);
+    }
+  }
+  return rows.map((row) => row.sort((left, right) => left.bbox.x - right.bbox.x));
+}
+
+function looksLikeAddress(text: string): boolean {
+  return /(?:도|시|군|구|읍|면|동|리|로|길|번지|아파트|빌라|호)/.test(text);
+}
+
 function pushCandidate(
   candidates: RedactionCandidate[],
   words: OcrWord[],
@@ -1099,7 +1123,7 @@ function findSchoolRecordFields(
     }
   }
 
-  for (const [lineIndex, words] of lines.entries()) {
+  for (const words of lines) {
     const lineText = words.map((word) => word.text).join('');
     const footerMatch = lineText.match(/\/([가-힣]{2,5})\s*$/);
     if (footerMatch && isLikelyFooterOutputter(footerMatch[1]) && words.some((word) => word.bbox.y > pageHeight * 0.88)) {
@@ -1194,39 +1218,28 @@ function findSchoolRecordFields(
     if (addressLabelIndex !== -1) {
       const label = words[addressLabelIndex];
       const labelCenterY = label.bbox.y + label.bbox.height / 2;
-      // Government24 exports can assign successive table rows to one PDF text
-      // line. Keep the first address row visual rather than logical: otherwise
-      // academic-history text below the address becomes one oversized mask.
-      const addressWords = words.slice(addressLabelIndex + 1).filter((word) => {
+      // Government24 exports can assign several visual table rows to one PDF
+      // line. Build masks by visual rows so wrapped addresses use their own
+      // glyph bounds instead of one tall rectangle that drifts into the next row.
+      const addressWords = allWords.filter((word) => {
         const centerY = word.bbox.y + word.bbox.height / 2;
         const sameVisualRow = Math.abs(centerY - labelCenterY) <= Math.max(label.bbox.height, word.bbox.height) * 1.15;
         return sameVisualRow && word.bbox.x > label.bbox.x;
       });
       if (addressWords.length > 0) {
-        const addressRect = unionRects(addressWords.map((word) => word.bbox), 5);
-        const likelyWraps =
-          addressWords.length >= 5 || addressRect.x + addressRect.width > pageWidth * 0.72;
-        pushRectCandidate(
-          candidates,
-          pageIndex,
-          'address',
-          '학생 주소',
-          likelyWraps ? '주소 항목(두 줄 범위 포함)' : '주소 항목',
-          {
-            ...addressRect,
-            height: addressRect.height + (likelyWraps ? label.bbox.height * 1.45 : 0),
-          },
-          Math.round(addressWords.reduce((sum, word) => sum + word.confidence, 0) / addressWords.length),
-        );
+        pushCandidate(candidates, addressWords, 'address', '학생 주소', '주소 항목');
       }
-      for (const continuation of lines.slice(lineIndex + 1, lineIndex + 5)) {
-        const lineTop = Math.min(...continuation.map((word) => word.bbox.y));
-        const closeBelow = lineTop - label.bbox.y < label.bbox.height * 7.5;
-        const addressText = continuation.map((word) => word.text).join('');
-        const looksLikeAddress = /(?:도|시|군|구|읍|면|동|리|로|길|번지|아파트|빌라|호)/.test(addressText);
-        const continuationWords = continuation.filter((word) => word.bbox.x > label.bbox.x - label.bbox.width * 0.15);
-        if (closeBelow && looksLikeAddress && continuationWords.length > 0) {
-          pushCandidate(candidates, continuationWords, 'address', '학생 주소', '주소 항목의 이어진 줄');
+      const continuationRows = visualRowGroups(
+        allWords.filter((word) => {
+          const centerY = word.bbox.y + word.bbox.height / 2;
+          const belowAddressRow = centerY > labelCenterY + Math.max(label.bbox.height, word.bbox.height) * 0.65;
+          const closeBelow = centerY - labelCenterY < label.bbox.height * 4.25;
+          return belowAddressRow && closeBelow && word.bbox.x > label.bbox.x - label.bbox.width * 0.15;
+        }),
+      );
+      for (const continuation of continuationRows) {
+        if (looksLikeAddress(continuation.map((word) => word.text).join(''))) {
+          pushCandidate(candidates, continuation, 'address', '학생 주소', '주소 항목의 이어진 줄');
         }
       }
     }

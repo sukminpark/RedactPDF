@@ -2,7 +2,13 @@ export type SaveLocation = 'source-folder' | 'chosen-folder' | 'downloads';
 
 export type PreparedBlobSaver = {
   location: SaveLocation;
+  startIn?: FileSystemDirectoryHandle | FileSystemFileHandle;
   save: (blob: Blob) => Promise<void>;
+};
+
+export type DirectoryBlob = {
+  fileName: string;
+  blob: Blob;
 };
 
 type SaveOptions = {
@@ -15,7 +21,7 @@ type SavePickerWindow = Window & {
   showSaveFilePicker: (options: {
     suggestedName: string;
     types: Array<{ description: string; accept: Record<string, string[]> }>;
-    startIn?: FileSystemFileHandle;
+    startIn?: FileSystemDirectoryHandle | FileSystemFileHandle;
   }) => Promise<FileSystemFileHandle>;
 };
 
@@ -27,8 +33,9 @@ async function nextAvailableFileName(
   directory: FileSystemDirectoryHandle,
   preferredName: string,
 ): Promise<string> {
-  const extension = preferredName.toLowerCase().endsWith('.zip') ? '.zip' : '.pdf';
-  const stem = preferredName.slice(0, -extension.length);
+  const extensionIndex = preferredName.lastIndexOf('.');
+  const extension = extensionIndex > 0 ? preferredName.slice(extensionIndex) : '';
+  const stem = extension ? preferredName.slice(0, -extension.length) : preferredName;
   let candidate = preferredName;
   let suffix = 2;
 
@@ -59,6 +66,17 @@ async function writeBlob(fileHandle: FileSystemFileHandle, blob: Blob): Promise<
   }
 }
 
+export async function saveBlobsToDirectory(
+  directory: FileSystemDirectoryHandle,
+  files: DirectoryBlob[],
+): Promise<void> {
+  for (const { fileName, blob } of files) {
+    const availableName = await nextAvailableFileName(directory, fileName);
+    const fileHandle = await directory.getFileHandle(availableName, { create: true });
+    await writeBlob(fileHandle, blob);
+  }
+}
+
 function triggerDownload(blob: Blob, fileName: string): void {
   const url = URL.createObjectURL(blob);
   const anchor = Object.assign(document.createElement('a'), {
@@ -76,11 +94,13 @@ export async function prepareBlobSaver(
   options: SaveOptions,
   sourceDirectory?: FileSystemDirectoryHandle | null,
   sourceFile?: FileSystemFileHandle | null,
+  preferredStartIn?: FileSystemDirectoryHandle | FileSystemFileHandle | null,
 ): Promise<PreparedBlobSaver> {
   if (sourceDirectory) {
     const availableName = await nextAvailableFileName(sourceDirectory, fileName);
     return {
       location: 'source-folder',
+      startIn: sourceDirectory,
       save: async (blob) => {
         const fileHandle = await sourceDirectory.getFileHandle(availableName, { create: true });
         await writeBlob(fileHandle, blob);
@@ -91,6 +111,7 @@ export async function prepareBlobSaver(
   const savePickerWindow = window as unknown as SavePickerWindow;
   if (typeof savePickerWindow.showSaveFilePicker === 'function') {
     try {
+      const startIn = preferredStartIn ?? sourceFile;
       const fileHandle = await savePickerWindow.showSaveFilePicker({
         suggestedName: fileName,
         types: [
@@ -99,10 +120,11 @@ export async function prepareBlobSaver(
             accept: { [options.mimeType]: [options.extension] },
           },
         ],
-        ...(sourceFile ? { startIn: sourceFile } : {}),
+        ...(startIn ? { startIn } : {}),
       });
       return {
         location: 'chosen-folder',
+        startIn: fileHandle,
         save: (blob) => writeBlob(fileHandle, blob),
       };
     } catch (error) {
