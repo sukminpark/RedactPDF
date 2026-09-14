@@ -17,6 +17,7 @@ import {
   Download,
   FileArchive,
   FileText,
+  FolderOpen,
   Grip,
   LockKeyhole,
   ListChecks,
@@ -81,6 +82,7 @@ import {
 } from '@/lib/pdf-processing';
 import { PdfProcessingError } from '@/lib/mupdf-types';
 import { deploymentAssetPath } from '@/lib/deployment-path';
+import { isSavePickerCancelled, prepareBlobSaver, type SaveLocation } from '@/lib/file-output';
 import {
   mergeAutomaticCandidates,
   sanitizeDownloadName,
@@ -98,6 +100,22 @@ type Gesture = {
   start: { x: number; y: number };
   redactionId?: string;
   original?: CanvasRect;
+};
+
+type DirectoryPickerWindow = Window & {
+  showDirectoryPicker: (options?: { id?: string; mode?: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle>;
+};
+
+type FilePickerWindow = Window & {
+  showOpenFilePicker: (options?: {
+    id?: string;
+    multiple?: boolean;
+    types?: Array<{ description: string; accept: Record<string, string[]> }>;
+  }) => Promise<FileSystemFileHandle[]>;
+};
+
+type DirectoryHandleWithValues = FileSystemDirectoryHandle & {
+  values: () => AsyncIterableIterator<FileSystemFileHandle | FileSystemDirectoryHandle>;
 };
 
 const kindLabels: Record<RedactionKind, string> = {
@@ -223,6 +241,10 @@ export default function Home() {
   const [activeBatchItemId, setActiveBatchItemId] = useState<string | null>(null);
   const [isAutomaticConfirmOpen, setIsAutomaticConfirmOpen] = useState(false);
   const [isCreatingArchive, setIsCreatingArchive] = useState(false);
+  const [saveLocation, setSaveLocation] = useState<SaveLocation | null>(null);
+  const [canPickSourceFolder, setCanPickSourceFolder] = useState(false);
+  const sourceDirectoryHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
+  const sourceFileHandleRef = useRef<FileSystemFileHandle | null>(null);
 
   useEffect(() => {
     pagesRef.current = pages;
@@ -231,6 +253,13 @@ export default function Home() {
   useEffect(() => {
     batchItemsRef.current = batchItems;
   }, [batchItems]);
+
+  useEffect(() => {
+    const frameId = window.requestAnimationFrame(() => {
+      setCanPickSourceFolder('showDirectoryPicker' in window);
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, []);
 
   const releasePageUrls = useCallback((states: PageReviewState[]) => {
     states.forEach((page) => URL.revokeObjectURL(page.imageUrl));
@@ -336,6 +365,9 @@ export default function Home() {
     setActiveBatchItemId(null);
     setIsAutomaticConfirmOpen(false);
     setIsCreatingArchive(false);
+    setSaveLocation(null);
+    sourceDirectoryHandleRef.current = null;
+    sourceFileHandleRef.current = null;
     if (fileInputRef.current) fileInputRef.current.value = '';
   }, [releasePageUrls]);
 
@@ -594,7 +626,11 @@ export default function Home() {
   }, [batchItems, batchPaused, batchStarted, passwordPrompt, processBatchItem]);
 
   const handleSelectedFiles = useCallback(
-    (selectedFiles: File[]) => {
+    (
+      selectedFiles: File[],
+      sourceDirectory?: FileSystemDirectoryHandle,
+      sourceFile?: FileSystemFileHandle,
+    ) => {
       if (selectedFiles.length === 0) return;
       const validationError = validateBatchSelection(selectedFiles);
       if (validationError) {
@@ -605,6 +641,8 @@ export default function Home() {
 
       void (async () => {
         await resetDocument();
+        sourceDirectoryHandleRef.current = sourceDirectory ?? null;
+        sourceFileHandleRef.current = sourceFile ?? null;
         if (selectedFiles.length === 1) {
           await processFile(selectedFiles[0]);
           return;
@@ -617,6 +655,53 @@ export default function Home() {
     },
     [processFile, resetDocument],
   );
+
+  const handleSelectedSourceFolder = useCallback(async () => {
+    if (!('showDirectoryPicker' in window)) return;
+    try {
+      const directory = await (window as DirectoryPickerWindow).showDirectoryPicker({
+        id: 'garim-pdf-source-folder',
+        mode: 'readwrite',
+      });
+      const selectedFiles: File[] = [];
+      for await (const entry of (directory as DirectoryHandleWithValues).values()) {
+        if (entry.kind !== 'file' || !entry.name.toLowerCase().endsWith('.pdf')) continue;
+        selectedFiles.push(await entry.getFile());
+        if (selectedFiles.length > MAX_BATCH_FILES) break;
+      }
+      if (selectedFiles.length === 0) {
+        setError('선택한 폴더에서 PDF 파일을 찾지 못했습니다.');
+        return;
+      }
+      selectedFiles.sort((left, right) => left.name.localeCompare(right.name, 'ko'));
+      handleSelectedFiles(selectedFiles, directory);
+    } catch (folderError) {
+      if (!isSavePickerCancelled(folderError)) {
+        setError(folderError instanceof Error ? folderError.message : '원본 폴더를 열지 못했습니다.');
+      }
+    }
+  }, [handleSelectedFiles]);
+
+  const handleSelectFiles = useCallback(async () => {
+    const pickerWindow = window as unknown as FilePickerWindow;
+    if (typeof pickerWindow.showOpenFilePicker !== 'function') {
+      fileInputRef.current?.click();
+      return;
+    }
+    try {
+      const handles = await pickerWindow.showOpenFilePicker({
+        id: 'garim-pdf-source-files',
+        multiple: true,
+        types: [{ description: 'PDF 파일', accept: { 'application/pdf': ['.pdf'] } }],
+      });
+      const selectedFiles = await Promise.all(handles.map((handle) => handle.getFile()));
+      handleSelectedFiles(selectedFiles, undefined, handles[0]);
+    } catch (filePickerError) {
+      if (!isSavePickerCancelled(filePickerError)) {
+        setError(filePickerError instanceof Error ? filePickerError.message : 'PDF 파일을 열지 못했습니다.');
+      }
+    }
+  }, [handleSelectedFiles]);
 
   const handleDroppedFile = useCallback(
     (event: DragEvent<HTMLButtonElement>) => {
@@ -698,6 +783,16 @@ export default function Home() {
     setIsCreatingArchive(true);
     setError(null);
     try {
+      const saver = await prepareBlobSaver(
+        batchArchiveName(),
+        {
+          description: '가림PDF 일괄처리 결과',
+          mimeType: 'application/zip',
+          extension: '.zip',
+        },
+        sourceDirectoryHandleRef.current,
+        sourceFileHandleRef.current,
+      );
       const archive = await createBatchArchive(
         currentItems.map((item) => ({
           originalName: item.file.name,
@@ -706,17 +801,12 @@ export default function Home() {
           error: item.error,
         })),
       );
-      const url = URL.createObjectURL(archive);
-      const anchor = Object.assign(document.createElement('a'), {
-        href: url,
-        download: batchArchiveName(),
-      });
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      await saver.save(archive);
+      setSaveLocation(saver.location);
     } catch (archiveError) {
-      setError(archiveError instanceof Error ? archiveError.message : 'ZIP 파일을 만들지 못했습니다.');
+      if (!isSavePickerCancelled(archiveError)) {
+        setError(archiveError instanceof Error ? archiveError.message : 'ZIP 파일을 만들지 못했습니다.');
+      }
     } finally {
       setIsCreatingArchive(false);
     }
@@ -919,6 +1009,16 @@ export default function Home() {
       });
     }
     try {
+      const saver = await prepareBlobSaver(
+        sanitizeDownloadName(file.name),
+        {
+          description: '가림PDF 비식별화 결과',
+          mimeType: 'application/pdf',
+          extension: '.pdf',
+        },
+        sourceDirectoryHandleRef.current,
+        sourceFileHandleRef.current,
+      );
       const bytes = await exportRedactedPdf(
         await file.arrayBuffer(),
         pagesToExport,
@@ -962,23 +1062,16 @@ export default function Home() {
         return;
       }
 
-      const url = URL.createObjectURL(blob);
-      const anchor = Object.assign(document.createElement('a'), {
-        href: url,
-        download: sanitizeDownloadName(file.name),
-      });
-      document.body.appendChild(anchor);
-      anchor.click();
-      anchor.remove();
-      // Keep the object URL alive until slower browsers and automation have
-      // finished opening the download stream.
-      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      await saver.save(blob);
+      setSaveLocation(saver.location);
       passwordRef.current = undefined;
       setStage('complete');
     } catch (exportError) {
       setStage('review');
       const message = exportError instanceof Error ? exportError.message : '새 PDF를 만들지 못했습니다.';
-      setError(message);
+      if (!isSavePickerCancelled(exportError)) {
+        setError(message);
+      }
       const batchItemId = activeBatchItemIdRef.current;
       if (batchItemId) {
         updateBatchItem(batchItemId, {
@@ -1183,22 +1276,23 @@ export default function Home() {
                 </Button>
               </div>
             ) : (
-              <button
-                type="button"
-                className={`group flex flex-1 flex-col items-center justify-center rounded-2xl border-2 border-dashed px-5 py-6 text-center transition sm:py-8 ${
-                  isDraggingFile
-                    ? 'border-primary bg-primary/[0.06]'
-                    : 'border-border bg-muted/45 hover:border-primary/50 hover:bg-muted/70'
-                }`}
-                onClick={() => fileInputRef.current?.click()}
-                onDragEnter={(event) => {
-                  event.preventDefault();
-                  setIsDraggingFile(true);
-                }}
-                onDragOver={(event) => event.preventDefault()}
-                onDragLeave={() => setIsDraggingFile(false)}
-                onDrop={handleDroppedFile}
-              >
+              <>
+                <button
+                  type="button"
+                  className={`group flex flex-1 flex-col items-center justify-center rounded-2xl border-2 border-dashed px-5 py-6 text-center transition sm:py-8 ${
+                    isDraggingFile
+                      ? 'border-primary bg-primary/[0.06]'
+                      : 'border-border bg-muted/45 hover:border-primary/50 hover:bg-muted/70'
+                  }`}
+                  onClick={() => void handleSelectFiles()}
+                  onDragEnter={(event) => {
+                    event.preventDefault();
+                    setIsDraggingFile(true);
+                  }}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDragLeave={() => setIsDraggingFile(false)}
+                  onDrop={handleDroppedFile}
+                >
                 <span className="mb-3 grid size-12 place-items-center rounded-2xl border border-border bg-background shadow-sm transition group-hover:-translate-y-1 sm:size-14">
                   <FileText className="size-6 text-primary sm:size-7" aria-hidden="true" />
                 </span>
@@ -1216,7 +1310,19 @@ export default function Home() {
                 <span className="mt-3.5 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-sm hover:bg-primary/90 transition-colors sm:mt-4 sm:py-2.5">
                   파일 선택
                 </span>
-              </button>
+                </button>
+                {canPickSourceFolder && (
+                  <button
+                    type="button"
+                    className="mt-3 flex items-center justify-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-xs font-semibold text-emerald-800 transition hover:border-emerald-300 hover:bg-emerald-100 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary"
+                    onClick={() => void handleSelectedSourceFolder()}
+                  >
+                    <FolderOpen className="size-4" aria-hidden="true" />
+                    원본 폴더에서 PDF 선택
+                    <span className="font-normal text-emerald-700">(결과를 같은 폴더에 저장)</span>
+                  </button>
+                )}
+              </>
             )}
             <input
               ref={fileInputRef}
@@ -1442,7 +1548,12 @@ export default function Home() {
           )}
           {stage === 'complete' && (
             <div aria-live="polite" className="mb-4 flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-800">
-              <CheckCircle2 className="size-4" aria-hidden="true" />새 PDF를 저장했습니다. 원본은 변경되지 않았어요.
+              <CheckCircle2 className="size-4" aria-hidden="true" />
+              {saveLocation === 'source-folder'
+                ? '원본 폴더에 새 PDF를 저장했습니다. 원본은 변경되지 않았어요.'
+                : saveLocation === 'chosen-folder'
+                  ? '선택한 폴더에 새 PDF를 저장했습니다. 원본은 변경되지 않았어요.'
+                  : '새 PDF를 저장했습니다. 원본은 변경되지 않았어요.'}
             </div>
           )}
 
